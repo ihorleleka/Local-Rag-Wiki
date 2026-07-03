@@ -48,6 +48,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 7331)
         self.assertEqual(settings.staleness_days, 90)
+        self.assertEqual(settings.note_max_lines, 200)
         self.assertEqual(settings.startup_reindex_timeout_seconds, 3)
 
 

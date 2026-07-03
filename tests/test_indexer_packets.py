@@ -247,6 +247,46 @@ Use typed packets.
         self.assertIn("missing_last_verified", issue_codes)
         self.assertIn("broken_wiki_link", issue_codes)
 
+    def test_schema_report_warns_for_notes_over_line_limit(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            wiki_root = Path(tmpdir) / "wiki"
+            wiki_root.mkdir()
+            oversized_body = "\n".join(
+                [
+                    "# Oversized",
+                    "",
+                    "## Summary",
+                    "This note is intentionally too long.",
+                    "",
+                    "## Key facts",
+                    "- One fact.",
+                    "",
+                    "## Evidence",
+                    "- README.md",
+                    "",
+                    "## Retrieval hints",
+                    "- oversized note",
+                    *["extra detail" for _ in range(8)],
+                ]
+            )
+            (wiki_root / "Oversized.md").write_text(oversized_body, encoding="utf-8")
+            settings = types.SimpleNamespace(
+                wiki_root=wiki_root,
+                kb_root=Path(tmpdir) / "kb",
+                embedding_model="dummy",
+                staleness_days=90,
+                note_max_lines=20,
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+            report = index.schema_report()
+
+        self.assertEqual(report["summary"]["max_note_lines"], 20)
+        self.assertEqual(report["summary"]["oversized_files"], 1)
+        entry = report["files"][0]
+        self.assertGreater(entry["line_count"], 20)
+        issue_codes = {issue["code"] for issue in entry["issues"]}
+        self.assertIn("note_too_large", issue_codes)
+
 
 if __name__ == "__main__":
     unittest.main()

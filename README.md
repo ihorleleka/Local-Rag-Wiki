@@ -75,6 +75,7 @@ returns aggregate counts and per-note entries for:
 - missing, invalid, or stale `last_verified`
 - missing or duplicate `id`
 - missing or invalid `status`
+- oversized notes above `KB_NOTE_MAX_LINES` lines
 - broken wiki links detected from `[[wikilinks]]`
 
 Use it before broad wiki migrations or after schema changes to decide which
@@ -114,6 +115,7 @@ Do not bake runtime `.kb` state into images.
 - `KB_TOP_K=8`
 - `KB_MERGE_ADJACENT_WINDOW=1`
 - `KB_STALENESS_DAYS=90`
+- `KB_NOTE_MAX_LINES=200`
 - `KB_WATCH_INTERVAL_SECONDS=15`
 
 ## Run

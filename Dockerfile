@@ -1,4 +1,4 @@
-FROM python:3.13-slim AS deps
+FROM python:3.14-slim AS deps
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && python -c "import tomllib, pathlib; p=pathlib.Path('/app/pyproject.toml'); data=tomllib.loads(p.read_text()); project=data.get('project', {}); dynamic=set(project.get('dynamic', [])); assert 'dependencies' not in dynamic, 'dynamic dependencies are not supported by this Docker build'; deps=list(project.get('dependencies', [])); optional=project.get('optional-dependencies', {}); [deps.extend(group) for group in optional.values()]; unique=list(dict.fromkeys(deps)); pathlib.Path('/tmp/requirements.txt').write_text('\n'.join(unique))" \
     && pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/requirements.txt
 
-FROM python:3.13-slim
+FROM python:3.14-slim
 
 WORKDIR /app
 ENV PATH="/opt/venv/bin:$PATH"

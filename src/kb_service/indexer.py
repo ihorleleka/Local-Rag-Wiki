@@ -42,6 +42,7 @@ SECTION_PRIORITY = {
 
 NOTE_KINDS = {"rule", "decision", "reference", "runbook", "glossary"}
 NOTE_STATUSES = {"active", "superseded", "deprecated", "pending"}
+DEFAULT_NOTE_MAX_LINES = 200
 
 REQUIRED_SECTIONS = {
     "rule": {
@@ -420,10 +421,12 @@ class KnowledgeIndex:
         indexed_paths = {str(p).replace("\\", "/") for p in relative_md_paths(self.settings.wiki_root)}
         records: list[dict[str, Any]] = []
         id_counts: dict[str, int] = {}
+        max_note_lines = max(1, int(getattr(self.settings, "note_max_lines", DEFAULT_NOTE_MAX_LINES)))
 
         for rel_path in relative_md_paths(self.settings.wiki_root):
             rel = str(rel_path).replace("\\", "/")
             raw = (self.settings.wiki_root / rel_path).read_text(encoding="utf-8")
+            line_count = len(raw.splitlines())
             parsed = frontmatter.loads(raw)
             body = parsed.content
             sections = parse_semantic_sections(body)
@@ -435,6 +438,7 @@ class KnowledgeIndex:
             records.append(
                 {
                     "source_file": rel,
+                    "line_count": line_count,
                     "metadata": parsed.metadata,
                     "body": body,
                     "sections": sections,
@@ -450,6 +454,7 @@ class KnowledgeIndex:
         by_kind: dict[str, int] = {}
         by_status: dict[str, int] = {}
         packet_files = 0
+        oversized_files = 0
         files_with_issues = 0
         issue_count = 0
 
@@ -485,6 +490,12 @@ class KnowledgeIndex:
                 add_issue("error", "missing_last_verified", "missing last_verified frontmatter")
             elif verified_date is None:
                 add_issue("error", "invalid_last_verified", "last_verified is not an ISO date")
+            if record["line_count"] > max_note_lines:
+                add_issue(
+                    "warning",
+                    "note_too_large",
+                    f"note has {record['line_count']} lines; split or condense notes above {max_note_lines} lines",
+                )
             for section in missing_sections:
                 add_issue("error", "missing_required_section", f"missing {section} section")
             if packet is None:
@@ -496,6 +507,8 @@ class KnowledgeIndex:
 
             if packet:
                 packet_files += 1
+            if record["line_count"] > max_note_lines:
+                oversized_files += 1
             if issues:
                 files_with_issues += 1
                 issue_count += len(issues)
@@ -506,6 +519,7 @@ class KnowledgeIndex:
             files.append(
                 {
                     "source_file": record["source_file"],
+                    "line_count": record["line_count"],
                     "note_id": record["note_id"],
                     "kind": kind,
                     "explicit_kind": record["explicit_kind"],
@@ -529,6 +543,8 @@ class KnowledgeIndex:
             "total_files": len(files),
             "summary": {
                 "packet_files": packet_files,
+                "oversized_files": oversized_files,
+                "max_note_lines": max_note_lines,
                 "files_with_issues": files_with_issues,
                 "issue_count": issue_count,
                 "by_kind": dict(sorted(by_kind.items())),

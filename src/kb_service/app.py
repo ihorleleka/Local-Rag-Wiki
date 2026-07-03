@@ -144,7 +144,7 @@ def create_app():
 
     @mcp.tool()
     def wiki_schema_report():
-        """Report typed note schema health, packet gaps, stale verification, duplicate ids, and broken wiki links."""
+        """Report typed note schema health, packet gaps, stale verification, oversized notes, duplicate ids, and broken wiki links."""
         return index.schema_report()
 
     @mcp.tool()
