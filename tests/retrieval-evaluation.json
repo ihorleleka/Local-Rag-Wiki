@@ -1,0 +1,86 @@
+{
+  "name": "project-rag-wiki-synthetic-retrieval-v1",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "chunk_tokens": 220,
+  "minimum_relevance": 0.35,
+  "thresholds": {
+    "min_owner_top1_accuracy": 0.9,
+    "min_top_k_accuracy": 0.9,
+    "min_mean_reciprocal_rank": 0.85,
+    "max_duplicate_source_rate": 0.25
+  },
+  "cases": [
+    {
+      "id": "repository-orientation",
+      "query": "Give me the repository map and tell me which wiki note owns each major implementation area.",
+      "expected_owner": "index.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "build-test-run",
+      "query": "What is the verified local workflow to build, test, run, and troubleshoot this solution?",
+      "expected_owner": "development-runbook.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "converter-ownership",
+      "query": "Where should the Hero element converter live, how is it keyed for dependency injection, and which generated model properties should it map?",
+      "expected_owner": "coding-standards.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "serialization-generation",
+      "query": "How do serialization roots compose in order and when must generated models be regenerated?",
+      "expected_owner": "components/serialization.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "editor-previews",
+      "query": "How does a saved-draft editor preview resolve and hydrate a component?",
+      "expected_owner": "components/editor-previews.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "frontend-accessibility",
+      "query": "What accessibility and design-system rules apply to frontend islands, semantic tokens, and reusable base components?",
+      "expected_owner": "ui-patterns.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "page-grid-areas",
+      "query": "Which page grid layout aliases and area slots are supported, and who owns page-grid conversion?",
+      "expected_owner": "components/page-grid.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "orchestration",
+      "query": "How does the application host provision SQL, object storage, startup bundles, and init-container dependencies?",
+      "expected_owner": "integrations/app-host.md",
+      "acceptable_alternatives": [],
+      "expected_miss": false,
+      "max_payload_bytes": 4096
+    },
+    {
+      "id": "undocumented-security-policy",
+      "query": "What is the approved production secret rotation interval, incident escalation phone number, and customer encryption key custody policy?",
+      "expected_owner": null,
+      "acceptable_alternatives": [],
+      "expected_miss": true,
+      "max_payload_bytes": 4096
+    }
+  ]
+}

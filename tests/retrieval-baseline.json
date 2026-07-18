@@ -1,0 +1,43 @@
+{
+  "dataset": "project-rag-wiki-synthetic-retrieval-v1",
+  "measured_utc": "2026-07-18",
+  "service_version": "0.0.18",
+  "index_schema_version": 6,
+  "mcp_tool_contract_version": 4,
+  "embedding_model": "all-MiniLM-L6-v2",
+  "minimum_relevance": 0.35,
+  "top_k": 3,
+  "metrics": {
+    "positive_cases": 8,
+    "expected_miss_cases": 1,
+    "owner_top1_accuracy": 1.0,
+    "top_k_accuracy": 1.0,
+    "mean_reciprocal_rank": 1.0,
+    "duplicate_source_rate": 0.21739130434782608,
+    "miss_precision": 1.0,
+    "negative_query_pass_rate": 1.0,
+    "max_response_bytes": 1748,
+    "max_result_bytes": 1240,
+    "max_approximate_response_tokens": 597,
+    "payload_pass_rate": 1.0
+  },
+  "gate": {
+    "passed": true,
+    "failures": []
+  },
+  "historical_local_consumer_model_comparisons": [
+    {
+      "embedding_model": "BAAI/bge-small-en-v1.5",
+      "owner_top1_accuracy": 1.0,
+      "negative_query_pass_rate": 0.0,
+      "gate_passed": false
+    },
+    {
+      "embedding_model": "sentence-transformers/all-MiniLM-L12-v2",
+      "owner_top1_accuracy": 0.875,
+      "negative_query_pass_rate": 0.0,
+      "gate_passed": false
+    }
+  ],
+  "model_decision": "Retain all-MiniLM-L6-v2. Consumer-derived challenger measurements are historical evidence only; future release decisions must pass the repository-owned synthetic corpus."
+}

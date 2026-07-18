@@ -7,34 +7,114 @@ on:
 
 env:
   IMAGE_NAME: ihorleleka/project-rag-wiki
+  CANDIDATE_IMAGE: project-rag-wiki:release-candidate
 
 jobs:
-  docker:
+  test-and-release:
     runs-on: ubuntu-latest
     permissions:
       contents: read
 
     steps:
-      - name: Check out repository
+      - name: Check out knowledge service
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Derive version from tag
+      - name: Validate release tag
         id: version
+        shell: bash
         run: |
           VERSION="${GITHUB_REF_NAME}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must be X.Y.Z; received: ${VERSION}" >&2
+            exit 1
+          fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
 
-      - name: Capture build timestamp
-        id: build_date
-        run: echo "value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
+      - name: Capture candidate metadata
+        id: metadata
+        shell: bash
+        run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - name: Build the only release candidate
+        run: |
+          docker build \
+            --build-arg VERSION="${{ steps.version.outputs.version }}" \
+            --build-arg VCS_REF="${GITHUB_SHA}" \
+            --build-arg BUILD_DATE="${{ steps.metadata.outputs.build_date }}" \
+            --build-arg INDEX_SCHEMA_VERSION=6 \
+            --build-arg MCP_TOOL_CONTRACT_VERSION=4 \
+            --tag "${CANDIDATE_IMAGE}" \
+            .
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+      - name: Verify candidate metadata
+        run: |
+          test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "${{ steps.version.outputs.version }}"
+          test "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'import importlib.metadata; print(importlib.metadata.version("kb-service"))')" = "${{ steps.version.outputs.version }}"
+
+      - name: Run real-model retrieval gate
+        run: |
+          mkdir -p artifacts
+          docker volume create project-rag-wiki-ci-hf
+          docker run --rm \
+            -v "${{ github.workspace }}/tests:/evaluation:ro" \
+            -v "${{ github.workspace }}/artifacts:/artifacts" \
+            -v "project-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
+            "${CANDIDATE_IMAGE}" \
+            python -m kb_service.evaluation \
+              --wiki-root /evaluation/fixtures/retrieval-wiki \
+              --dataset /evaluation/retrieval-evaluation.json \
+              --output /artifacts/wiki-retrieval-report.json \
+              --top-k 3
+
+      - name: Run fast unit suite in candidate image
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/tests:/tests:ro" \
+            "${CANDIDATE_IMAGE}" \
+            python -m unittest discover -s /tests -p "test_*.py" -v
+
+      - name: Run real Chroma integration suite
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/tests:/integration:ro" \
+            "${CANDIDATE_IMAGE}" \
+            python /integration/integration_real.py
+
+      - name: Start release-candidate container
+        run: |
+          docker volume create project-rag-wiki-ci-kb
+          docker run -d --name project-rag-wiki-ci-smoke \
+            -p 127.0.0.1:18111:1111 \
+            -v "${{ github.workspace }}/tests/fixtures/retrieval-wiki:/workspace/wiki:ro" \
+            -v "${{ github.workspace }}:/repository:ro" \
+            -v "project-rag-wiki-ci-kb:/workspace/.kb" \
+            -v "project-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
+            "${CANDIDATE_IMAGE}"
+          for attempt in $(seq 1 120); do
+            if curl --fail --silent http://127.0.0.1:18111/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          docker logs project-rag-wiki-ci-smoke
+          exit 1
+
+      - name: Probe release-candidate HTTP and MCP surface
+        run: python tests/container_smoke.py 18111
+
+      - name: Clean smoke resources
+        if: always()
+        run: |
+          docker rm -f project-rag-wiki-ci-smoke 2>/dev/null || true
+          docker volume rm project-rag-wiki-ci-kb 2>/dev/null || true
+          docker volume rm project-rag-wiki-ci-hf 2>/dev/null || true
+
+      - name: Upload retrieval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wiki-retrieval-report
+          path: artifacts/wiki-retrieval-report.json
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
@@ -42,30 +122,9 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=${{ steps.version.outputs.version }}
-            type=raw,value=latest
-          labels: |
-            org.opencontainers.image.version=${{ steps.version.outputs.version }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-
-      - name: Build and push image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ./Dockerfile
-          push: true
-          platforms: linux/amd64,linux/arm64
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            VERSION=${{ steps.version.outputs.version }}
-            VCS_REF=${{ github.sha }}
-            BUILD_DATE=${{ steps.build_date.outputs.value }}
-    
+      - name: Push the tested candidate without rebuilding
+        run: |
+          docker tag "${CANDIDATE_IMAGE}" "${IMAGE_NAME}:${{ steps.version.outputs.version }}"
+          docker tag "${CANDIDATE_IMAGE}" "${IMAGE_NAME}:latest"
+          docker push "${IMAGE_NAME}:${{ steps.version.outputs.version }}"
+          docker push "${IMAGE_NAME}:latest"

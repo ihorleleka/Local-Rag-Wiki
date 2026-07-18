@@ -1,18 +1,29 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import re
+import threading
+import fnmatch
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Callable
 
 import chromadb
 import frontmatter
 
 from .embeddings import LocalSentenceTransformerProvider
+from .atomic_io import atomic_write_text
+from .evidence import EvidenceInspector, EvidenceReport, declared_evidence_report
 from .settings import Settings
-from .text_utils import chunks, extract_links, relative_md_paths, sha256_text
+from .text_utils import (
+    extract_links,
+    markdown_chunks,
+    merge_contexts_without_overlap,
+    relative_md_paths,
+    sha256_text,
+)
 
 SEMANTIC_SECTIONS = {
     "use this when": "use_this_when",
@@ -29,6 +40,32 @@ SEMANTIC_SECTIONS = {
     "aliases": "aliases",
     "evidence": "evidence",
     "retrieval hints": "retrieval_hints",
+    "capability contract": "capability_contract",
+    "behavior model": "behavior_model",
+    "interaction model": "interaction_model",
+    "architecture boundaries": "architecture_boundaries",
+    "data and integration contracts": "data_integration_contracts",
+    "quality attributes": "quality_attributes",
+    "acceptance and verification": "acceptance_verification",
+    "reconstruction guidance": "reconstruction_guidance",
+    "open questions": "open_questions",
+}
+
+CAPABILITY_SECTION_LABELS = {
+    "capability_contract": "Capability contract",
+    "behavior_model": "Behavior model",
+    "interaction_model": "Interaction model",
+    "architecture_boundaries": "Architecture boundaries",
+    "data_integration_contracts": "Data and integration contracts",
+    "quality_attributes": "Quality attributes",
+    "acceptance_verification": "Acceptance and verification",
+    "reconstruction_guidance": "Reconstruction guidance",
+    "open_questions": "Open questions",
+}
+CAPABILITY_REQUIRED_SECTIONS = {
+    "capability_contract": "Capability contract",
+    "architecture_boundaries": "Architecture boundaries",
+    "acceptance_verification": "Acceptance and verification",
 }
 
 SECTION_PRIORITY = {
@@ -43,6 +80,11 @@ SECTION_PRIORITY = {
 NOTE_KINDS = {"rule", "decision", "reference", "runbook", "glossary"}
 NOTE_STATUSES = {"active", "superseded", "deprecated", "pending"}
 DEFAULT_NOTE_MAX_LINES = 200
+PACKET_EMBEDDING_TOKEN_BUDGET = 240
+PACKET_SCORE_BOOST = 0.04
+UNVERIFIED_PACKET_PENALTY = 0.03
+MAX_RESULTS_PER_SOURCE = 2
+INACTIVE_NOTE_STATUSES = {"superseded", "deprecated"}
 
 REQUIRED_SECTIONS = {
     "rule": {
@@ -82,9 +124,8 @@ REQUIRED_SECTIONS = {
     },
 }
 
-INDEX_SCHEMA_VERSION = 4
+INDEX_SCHEMA_VERSION = 6
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
-PATH_RE = re.compile(r"(?P<path>(?:[A-Za-z]:[\\/])?[\w .@()+={}\[\],'-]+[\\/][\w .@()+={}\[\],'-]+)")
 
 
 @dataclass
@@ -99,13 +140,45 @@ class SearchResult:
 
 
 @dataclass
+class SearchCandidate:
+    source_file: str
+    chunk_idx: int
+    semantic_score: float
+    context: str
+    record_type: str
+    packet: dict[str, Any] | None
+    metadata: dict[str, Any]
+
+    @property
+    def ranking_score(self) -> float:
+        score = self.semantic_score
+        if self.record_type == "packet":
+            score += PACKET_SCORE_BOOST
+            if self.packet and self.packet.get(
+                "verification_required",
+                self.packet.get("needs_verification", False),
+            ):
+                score -= UNVERIFIED_PACKET_PENALTY
+        return max(0.0, min(1.0, score))
+
+    @property
+    def note_status(self) -> str:
+        value = self.metadata.get("note_status")
+        if not value and self.packet:
+            value = self.packet.get("status")
+        return str(value or "active").strip().lower()
+
+
+@dataclass
 class ContextPacket:
     kind: str
     rule: str
-    confidence: str
+    schema_health: str
+    freshness_state: str
+    evidence_state: str
     source: str
     last_verified: str | None
-    needs_verification: bool
+    verification_required: bool
     applies_to: list[str]
     do: list[str]
     do_not: list[str]
@@ -113,6 +186,11 @@ class ContextPacket:
     gaps: list[str]
     metadata: dict[str, Any]
     index_text: str
+
+    @property
+    def needs_verification(self) -> bool:
+        """Compatibility alias scheduled for removal in a future tool contract."""
+        return self.verification_required
 
 
 def _string_list(value: Any) -> list[str]:
@@ -214,10 +292,9 @@ def _first_content(*values: str, items: list[str] | None = None) -> str:
     return ""
 
 
-def _as_metadata_value(value: Any) -> str | int | float | bool:
-    if isinstance(value, (str, int, float, bool)):
-        return value
-    return json.dumps(value, default=KnowledgeIndex._json_default)
+def _document_title(markdown: str) -> str:
+    match = re.search(r"^#\s+(.+?)\s*$", markdown, re.MULTILINE)
+    return match.group(1).strip() if match else ""
 
 
 def _missing_wiki_links(links: list[str], indexed_paths: set[str]) -> list[str]:
@@ -244,6 +321,7 @@ class KnowledgeIndex:
         self.client = chromadb.PersistentClient(path=str(self.settings.kb_root / "chroma"))
         self.collection = self.client.get_or_create_collection("wiki_chunks", metadata={"hnsw:space": "cosine"})
         self.provider = LocalSentenceTransformerProvider(settings.embedding_model)
+        self._write_lock = threading.RLock()
 
     def _read_manifest(self) -> dict[str, Any]:
         if not self.manifest_path.exists():
@@ -252,10 +330,20 @@ class KnowledgeIndex:
 
     def _write_manifest(self, manifest: dict[str, Any]) -> None:
         manifest["updated_utc"] = datetime.now(timezone.utc).isoformat()
-        self.manifest_path.write_text(
-            json.dumps(manifest, indent=2, default=self._json_default),
-            encoding="utf-8",
+        atomic_write_text(
+            self.manifest_path,
+            json.dumps(manifest, indent=2, default=self._json_default) + "\n",
         )
+
+    def index_revision(self) -> str:
+        manifest = self._read_manifest()
+        canonical_files = json.dumps(
+            manifest.get("files", {}),
+            sort_keys=True,
+            separators=(",", ":"),
+            default=self._json_default,
+        )
+        return sha256_text(canonical_files)
 
     @staticmethod
     def _json_default(value: Any) -> str:
@@ -263,29 +351,89 @@ class KnowledgeIndex:
             return value.isoformat()
         return str(value)
 
-    def _evidence_changed_after_verification(self, evidence: list[str], last_verified: date | None) -> bool:
-        if last_verified is None:
-            return False
+    def _build_packet_embedding_document(
+        self,
+        *,
+        rel: str,
+        title: str,
+        note_id: str,
+        use_this_when: str,
+        retrieval_hints: list[str],
+        aliases: list[str],
+        applies_to: list[str],
+        primary: str,
+        constraints: list[str],
+        anti_patterns: list[str],
+        key_facts: list[str],
+        steps: list[str],
+        capability_contract: list[str],
+        architecture_boundaries: list[str],
+        quality_attributes: list[str],
+        acceptance_verification: list[str],
+    ) -> str:
+        token_budget = min(PACKET_EMBEDDING_TOKEN_BUDGET, self.provider.max_input_tokens)
+        lines: list[str] = []
 
-        roots = [self.settings.wiki_root, self.settings.wiki_root.parent]
-        for item in evidence:
-            for match in PATH_RE.finditer(item):
-                raw_path = match.group("path").strip().strip("`.,;:)")
-                candidates: list[Path]
-                path = Path(raw_path)
-                if path.is_absolute():
-                    candidates = [path]
+        def append_line(label: str, value: str, max_value_tokens: int) -> None:
+            value = value.strip()
+            if not value:
+                return
+            bounded_value = self.provider.truncate_to_tokens(value, max_value_tokens)
+            if not bounded_value:
+                return
+            candidate = "\n".join([*lines, f"{label}: {bounded_value}"])
+            if self.provider.token_count(candidate) <= token_budget:
+                lines.append(f"{label}: {bounded_value}")
+                return
+
+            low, high = 0, max_value_tokens
+            accepted = ""
+            while low <= high:
+                midpoint = (low + high) // 2
+                truncated = self.provider.truncate_to_tokens(value, midpoint)
+                candidate = "\n".join([*lines, f"{label}: {truncated}"])
+                if truncated and self.provider.token_count(candidate) <= token_budget:
+                    accepted = truncated
+                    low = midpoint + 1
                 else:
-                    candidates = [root / path for root in roots]
-                for candidate in candidates:
-                    try:
-                        if candidate.is_file() and datetime.fromtimestamp(candidate.stat().st_mtime).date() > last_verified:
-                            return True
-                    except OSError:
-                        continue
-        return False
+                    high = midpoint - 1
+            if accepted:
+                lines.append(f"{label}: {accepted}")
 
-    def compile_context_packet(self, rel: str, metadata: dict[str, Any], body: str) -> ContextPacket | None:
+        # Retrieval identity and routing fields must precede descriptive detail.
+        append_line("Title", title, 24)
+        append_line("Source", rel, 24)
+        append_line("Name", note_id, 16)
+        append_line("Use this when", use_this_when, 48)
+        append_line("Retrieval hints", "; ".join(retrieval_hints), 48)
+        append_line("Aliases", "; ".join(aliases), 32)
+        append_line("Applies to", "; ".join(applies_to), 32)
+        append_line("Primary contract", primary, 64)
+        append_line("Capability contract", "; ".join(capability_contract), 48)
+        append_line("Architecture boundaries", "; ".join(architecture_boundaries), 40)
+        append_line("Quality attributes", "; ".join(quality_attributes), 32)
+        append_line("Verification", "; ".join(acceptance_verification), 32)
+
+        # Only decision-bearing detail competes for the remaining token budget.
+        append_line("Constraints", "; ".join(constraints), 48)
+        append_line("Anti-patterns", "; ".join(anti_patterns), 40)
+        append_line("Key facts", "; ".join(key_facts), 48)
+        append_line("Steps", "; ".join(steps), 48)
+
+        document = "\n".join(lines)
+        if self.provider.token_count(document) > token_budget:
+            raise ValueError(
+                f"packet embedding document exceeds token budget: {self.provider.token_count(document)} > {token_budget}"
+            )
+        return document
+
+    def compile_context_packet(
+        self,
+        rel: str,
+        metadata: dict[str, Any],
+        body: str,
+        evidence_report: EvidenceReport | None = None,
+    ) -> ContextPacket | None:
         sections = parse_semantic_sections(body)
         kind, explicit_kind = _normalise_kind(metadata.get("kind"), sections)
         note_rule = sections.get("rule", "").strip()
@@ -300,32 +448,86 @@ class KnowledgeIndex:
         terms = _list_items(sections.get("terms", ""))
         aliases = _list_items(sections.get("aliases", ""))
         evidence_items = _list_items(sections.get("evidence", ""))
+        evidence_report = evidence_report or declared_evidence_report(
+            evidence_items,
+            int(getattr(self.settings, "evidence_max_anchors", 12)),
+        )
         retrieval_hints = _list_items(sections.get("retrieval_hints", ""))
         use_this_when = sections.get("use_this_when", "").strip()
+        capability_contract = _list_items(sections.get("capability_contract", ""))
+        behavior_model = _list_items(sections.get("behavior_model", ""))
+        interaction_model = _list_items(sections.get("interaction_model", ""))
+        architecture_boundaries = _list_items(sections.get("architecture_boundaries", ""))
+        data_integration_contracts = _list_items(sections.get("data_integration_contracts", ""))
+        quality_attributes = _list_items(sections.get("quality_attributes", ""))
+        acceptance_verification = _list_items(sections.get("acceptance_verification", ""))
+        reconstruction_guidance = _list_items(sections.get("reconstruction_guidance", ""))
+        open_questions = _list_items(sections.get("open_questions", ""))
 
         if not any([note_rule, decision, summary, do_items, do_not_items, key_facts, steps, terms, aliases, evidence_items]):
             return None
 
         last_verified = _normalise_date(metadata.get("last_verified"))
         verified_date = _parse_last_verified(last_verified)
-        stale = verified_date is None or verified_date < date.today() - timedelta(days=self.settings.staleness_days)
-        evidence_changed = self._evidence_changed_after_verification(evidence_items, verified_date)
-        needs_verification = stale or evidence_changed
+        stale = verified_date is not None and verified_date < date.today() - timedelta(days=self.settings.staleness_days)
 
         gaps: list[str] = []
+        schema_issues: list[str] = []
         if not explicit_kind:
-            gaps.append("missing or invalid kind frontmatter")
+            schema_issues.append("missing or invalid kind frontmatter")
         for section_key, section_label in REQUIRED_SECTIONS[kind].items():
             if section_key not in sections:
-                gaps.append(f"missing {section_label} section")
+                schema_issues.append(f"missing {section_label} section")
+        note_id = str(metadata.get("id", "") or "").strip()
+        if not note_id:
+            schema_issues.append("missing id frontmatter")
+        note_status = str(metadata.get("status", "") or "").strip()
+        if not note_status:
+            schema_issues.append("missing status frontmatter")
+        elif note_status not in NOTE_STATUSES:
+            schema_issues.append(f"invalid status frontmatter: {note_status}")
+        gaps.extend(schema_issues)
         if not last_verified:
             gaps.append("missing last_verified")
         elif stale:
             gaps.append("last_verified exceeds staleness threshold")
-        if evidence_changed:
-            gaps.append("evidence source changed after verification")
+        if evidence_report.state == "missing":
+            gaps.append("evidence not provided")
+            if evidence_report.missing_targets:
+                gaps[-1] = "missing evidence anchors: " + ", ".join(evidence_report.missing_targets[:4])
+        if evidence_report.state == "changed_since_verification":
+            targets = evidence_report.changed_targets or tuple(
+                anchor.target
+                for anchor in evidence_report.anchors
+                if anchor.working_tree_state != "clean"
+            )
+            gaps.append("evidence changed since verification: " + ", ".join(targets[:4]))
+        if evidence_report.excessive_inventory:
+            gaps.append(
+                f"evidence inventory has {evidence_report.verifiable_count} anchors; "
+                f"prefer at most {evidence_report.max_anchors} owner-level anchors"
+            )
+        evidence_issues: list[str] = []
+        if evidence_report.missing_targets:
+            sample = ", ".join(evidence_report.missing_targets[:4])
+            remainder = len(evidence_report.missing_targets) - 4
+            evidence_issues.append(f"missing: {sample}" + (f" (+{remainder} more)" if remainder > 0 else ""))
+        if evidence_report.changed_targets:
+            sample = ", ".join(evidence_report.changed_targets[:4])
+            remainder = len(evidence_report.changed_targets) - 4
+            evidence_issues.append(f"changed: {sample}" + (f" (+{remainder} more)" if remainder > 0 else ""))
+
+        schema_health = "complete" if not schema_issues else "incomplete"
+        freshness_state = "unknown" if verified_date is None else ("stale" if stale else "current")
+        evidence_state = evidence_report.state
+        verification_required = (
+            schema_health != "complete"
+            or freshness_state != "current"
+            or evidence_state != "present"
+        )
 
         rule = _first_content(
+            sections.get("capability_contract", ""),
             note_rule,
             decision,
             summary,
@@ -334,7 +536,6 @@ class KnowledgeIndex:
             consequences,
             items=do_items or key_facts or steps or terms,
         )
-        confidence = "medium" if needs_verification or gaps else "high"
         applies_to = _string_list(metadata.get("applies_to"))
 
         semantic_metadata = {
@@ -355,9 +556,19 @@ class KnowledgeIndex:
             "terms": terms,
             "aliases": aliases,
             "evidence": evidence_items,
+            "evidence_summary": evidence_report.summary(),
+            "evidence_issues": evidence_issues,
             "examples": [],
             "retrieval_hints": retrieval_hints,
-            "raw_prose": body,
+            "capability_contract": capability_contract,
+            "behavior_model": behavior_model,
+            "interaction_model": interaction_model,
+            "architecture_boundaries": architecture_boundaries,
+            "data_integration_contracts": data_integration_contracts,
+            "quality_attributes": quality_attributes,
+            "acceptance_verification": acceptance_verification,
+            "reconstruction_guidance": reconstruction_guidance,
+            "has_open_questions": bool(open_questions),
         }
 
         packet = {
@@ -366,10 +577,13 @@ class KnowledgeIndex:
             "decision": decision,
             "rationale": rationale,
             "consequences": consequences,
-            "confidence": confidence,
+            "schema_health": schema_health,
+            "freshness_state": freshness_state,
+            "evidence_state": evidence_state,
             "source": rel,
             "last_verified": last_verified,
-            "needs_verification": needs_verification,
+            "verification_required": verification_required,
+            "needs_verification": verification_required,
             "applies_to": applies_to,
             "do": do_items,
             "do_not": do_not_items,
@@ -379,42 +593,56 @@ class KnowledgeIndex:
             "terms": terms,
             "aliases": aliases,
             "evidence": evidence_items,
+            "evidence_summary": evidence_report.summary(),
+            "evidence_issues": evidence_issues,
             "gaps": gaps,
+            "status": note_status,
+            "capability_contract": capability_contract,
+            "behavior_model": behavior_model,
+            "interaction_model": interaction_model,
+            "architecture_boundaries": architecture_boundaries,
+            "data_integration_contracts": data_integration_contracts,
+            "quality_attributes": quality_attributes,
+            "acceptance_verification": acceptance_verification,
+            "reconstruction_guidance": reconstruction_guidance,
+            "has_open_questions": bool(open_questions),
         }
 
-        index_parts = [
-            f"Kind: {kind}",
-            f"Use this when: {use_this_when}",
-            f"Rule: {note_rule}",
-            f"Decision: {decision}",
-            f"Rationale: {rationale}",
-            f"Consequences: {consequences}",
-            f"Summary: {summary}",
-            "Do: " + "; ".join(do_items),
-            "Do not: " + "; ".join(do_not_items),
-            "Key facts: " + "; ".join(key_facts),
-            "Steps: " + "; ".join(steps),
-            "Terms: " + "; ".join(terms),
-            "Aliases: " + "; ".join(aliases),
-            "Evidence: " + "; ".join(evidence_items),
-            "Retrieval hints: " + "; ".join(retrieval_hints),
-            "Applies to: " + "; ".join(applies_to),
-        ]
+        index_text = self._build_packet_embedding_document(
+            rel=rel,
+            title=_document_title(body),
+            note_id=str(metadata.get("id", "") or ""),
+            use_this_when=use_this_when,
+            retrieval_hints=retrieval_hints,
+            aliases=aliases,
+            applies_to=applies_to,
+            primary=rule,
+            constraints=do_items,
+            anti_patterns=do_not_items,
+            key_facts=key_facts,
+            steps=steps,
+            capability_contract=capability_contract,
+            architecture_boundaries=architecture_boundaries,
+            quality_attributes=quality_attributes,
+            acceptance_verification=acceptance_verification,
+        )
 
         return ContextPacket(
             kind=kind,
             rule=rule,
-            confidence=confidence,
+            schema_health=schema_health,
+            freshness_state=freshness_state,
+            evidence_state=evidence_state,
             source=rel,
             last_verified=last_verified,
-            needs_verification=needs_verification,
+            verification_required=verification_required,
             applies_to=applies_to,
             do=do_items,
             do_not=do_not_items,
             evidence=evidence_items,
             gaps=gaps,
             metadata={**semantic_metadata, "context_packet": packet},
-            index_text="\n".join(part for part in index_parts if part.strip()),
+            index_text=index_text,
         )
 
     def schema_report(self) -> dict[str, Any]:
@@ -423,6 +651,12 @@ class KnowledgeIndex:
         id_counts: dict[str, int] = {}
         max_note_lines = max(1, int(getattr(self.settings, "note_max_lines", DEFAULT_NOTE_MAX_LINES)))
 
+        evidence_inspector = EvidenceInspector(
+            getattr(self.settings, "repository_root", self.settings.wiki_root.parent),
+            int(getattr(self.settings, "evidence_max_anchors", 12)),
+            getattr(self.settings, "repository_root", self.settings.wiki_root.parent)
+            / self.settings.wiki_root.name,
+        )
         for rel_path in relative_md_paths(self.settings.wiki_root):
             rel = str(rel_path).replace("\\", "/")
             raw = (self.settings.wiki_root / rel_path).read_text(encoding="utf-8")
@@ -430,6 +664,7 @@ class KnowledgeIndex:
             parsed = frontmatter.loads(raw)
             body = parsed.content
             sections = parse_semantic_sections(body)
+            evidence_report = evidence_inspector.inspect(_list_items(sections.get("evidence", "")))
             kind, explicit_kind = _normalise_kind(parsed.metadata.get("kind"), sections)
             links = extract_links(body)
             note_id = str(parsed.metadata.get("id", "") or "").strip()
@@ -447,6 +682,7 @@ class KnowledgeIndex:
                     "note_id": note_id,
                     "links": links,
                     "broken_links": _missing_wiki_links(links, indexed_paths),
+                    "evidence_report": evidence_report,
                 }
             )
 
@@ -462,11 +698,20 @@ class KnowledgeIndex:
             metadata = record["metadata"]
             sections = record["sections"]
             kind = str(record["kind"])
-            packet = self.compile_context_packet(record["source_file"], metadata, record["body"])
+            evidence_report = record["evidence_report"]
+            packet = self.compile_context_packet(
+                record["source_file"], metadata, record["body"], evidence_report
+            )
             missing_sections = [
                 section_label
                 for section_key, section_label in REQUIRED_SECTIONS[kind].items()
                 if section_key not in sections
+            ]
+            capability_specification = any(key in sections for key in CAPABILITY_SECTION_LABELS)
+            missing_capability_sections = [
+                section_label
+                for section_key, section_label in CAPABILITY_REQUIRED_SECTIONS.items()
+                if capability_specification and section_key not in sections
             ]
             last_verified = _normalise_date(metadata.get("last_verified"))
             verified_date = _parse_last_verified(last_verified)
@@ -498,12 +743,42 @@ class KnowledgeIndex:
                 )
             for section in missing_sections:
                 add_issue("error", "missing_required_section", f"missing {section} section")
+            for section in missing_capability_sections:
+                add_issue(
+                    "warning",
+                    "missing_capability_section",
+                    f"capability specification is missing {section} section",
+                )
             if packet is None:
                 add_issue("error", "packet_not_compiled", "note does not compile into a context packet")
-            elif packet.needs_verification:
-                add_issue("warning", "needs_verification", "packet needs verification")
+            elif packet.verification_required:
+                add_issue("warning", "verification_required", "packet requires verification")
             for link in record["broken_links"]:
                 add_issue("warning", "broken_wiki_link", f"wiki link target not found: {link}")
+            if evidence_report.missing_targets:
+                sample = ", ".join(evidence_report.missing_targets[:4])
+                remainder = len(evidence_report.missing_targets) - 4
+                add_issue(
+                    "warning",
+                    "missing_evidence_anchors",
+                    f"{len(evidence_report.missing_targets)} evidence anchor(s) not found: {sample}"
+                    + (f" (+{remainder} more)" if remainder > 0 else ""),
+                )
+            if evidence_report.changed_targets:
+                sample = ", ".join(evidence_report.changed_targets[:4])
+                remainder = len(evidence_report.changed_targets) - 4
+                add_issue(
+                    "warning",
+                    "changed_evidence_anchors",
+                    f"{len(evidence_report.changed_targets)} evidence anchor(s) changed: {sample}"
+                    + (f" (+{remainder} more)" if remainder > 0 else ""),
+                )
+            if evidence_report.excessive_inventory:
+                add_issue(
+                    "warning",
+                    "evidence_inventory_too_large",
+                    f"{evidence_report.verifiable_count} evidence anchors exceed the owner-level budget of {evidence_report.max_anchors}",
+                )
 
             if packet:
                 packet_files += 1
@@ -526,12 +801,19 @@ class KnowledgeIndex:
                     "status": status,
                     "last_verified": last_verified,
                     "packet_compiled": packet is not None,
-                    "confidence": packet.confidence if packet else "none",
+                    "schema_health": packet.schema_health if packet else "incomplete",
+                    "freshness_state": packet.freshness_state if packet else "unknown",
+                    "evidence_state": packet.evidence_state if packet else "missing",
+                    "verification_required": packet.verification_required if packet else True,
                     "needs_verification": packet.needs_verification if packet else True,
                     "gaps": packet.gaps if packet else ["packet not compiled"],
                     "missing_sections": missing_sections,
+                    "capability_specification": capability_specification,
+                    "missing_capability_sections": missing_capability_sections,
                     "links": record["links"],
                     "broken_links": record["broken_links"],
+                    "evidence_summary": evidence_report.summary(),
+                    "evidence_anchors": [anchor.snapshot() for anchor in evidence_report.anchors],
                     "issues": issues,
                 }
             )
@@ -553,30 +835,160 @@ class KnowledgeIndex:
             "files": files,
         }
 
-    def reindex(self) -> dict[str, int]:
+    def reindex(
+        self,
+        *,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        # Serialize filesystem snapshots, Chroma mutations, and manifest writes
+        # with hash-protected note mutations. The async coordinator serializes
+        # reindex requests; this lock also closes the race between a watcher
+        # pass and a concurrent MCP write/delete/rename.
+        with self._write_lock:
+            return self._reindex_unlocked(
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+
+    def reindex_paths(
+        self,
+        rel_paths: set[str],
+        *,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        normalized = {path.replace("\\", "/") for path in rel_paths}
+        with self._write_lock:
+            manifest = self._read_manifest()
+            files = manifest.get("files", {})
+            # Older manifests do not contain enough dependency information for
+            # a safe targeted update. A note used as evidence by another note
+            # also requires a full pass so its trust state is refreshed.
+            if any("evidence_items" not in record for record in files.values()):
+                return self._reindex_unlocked(
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                )
+            repository_root = getattr(
+                self.settings,
+                "repository_root",
+                self.settings.wiki_root.parent,
+            ).resolve()
+            try:
+                wiki_prefix = self.settings.wiki_root.resolve().relative_to(repository_root).as_posix()
+            except ValueError:
+                wiki_prefix = self.settings.wiki_root.name
+            changed_targets = normalized | {
+                f"{wiki_prefix}/{path}" for path in normalized
+            }
+            for owner, record in files.items():
+                if owner in normalized:
+                    continue
+                evidence_snapshot = record.get("evidence_snapshot", {})
+                dependency_hit = False
+                for anchor in evidence_snapshot.values():
+                    target = str(anchor.get("target", "")).replace("\\", "/").rstrip("/")
+                    kind = str(anchor.get("kind", "path"))
+                    if kind == "glob":
+                        dependency_hit = any(fnmatch.fnmatch(path, target) for path in changed_targets)
+                    elif kind == "dir":
+                        dependency_hit = any(
+                            path == target or path.startswith(f"{target}/")
+                            for path in changed_targets
+                        )
+                    else:
+                        dependency_hit = target in changed_targets
+                    if dependency_hit:
+                        break
+                if dependency_hit:
+                    return self._reindex_unlocked(
+                        cancel_event=cancel_event,
+                        progress_callback=progress_callback,
+                    )
+            return self._reindex_unlocked(
+                target_paths=normalized,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+
+    def _reindex_unlocked(
+        self,
+        *,
+        target_paths: set[str] | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
         manifest = self._read_manifest()
         prev = manifest.get("files", {})
-        current: dict[str, Any] = {}
+        current: dict[str, Any] = dict(prev) if target_paths is not None else {}
         changed = 0
         removed = 0
+        evidence_inspector = EvidenceInspector(
+            getattr(self.settings, "repository_root", self.settings.wiki_root.parent),
+            int(getattr(self.settings, "evidence_max_anchors", 12)),
+            getattr(self.settings, "repository_root", self.settings.wiki_root.parent)
+            / self.settings.wiki_root.name,
+        )
 
-        indexed_paths = {str(p).replace('\\', '/') for p in relative_md_paths(self.settings.wiki_root)}
+        all_paths = [str(path).replace("\\", "/") for path in relative_md_paths(self.settings.wiki_root)]
+        indexed_paths = set(all_paths)
+        paths_to_visit = all_paths if target_paths is None else sorted(target_paths & indexed_paths)
+        paths_to_remove = (
+            set(prev) - indexed_paths if target_paths is None else target_paths - indexed_paths
+        )
+        total_work = len(paths_to_visit) + len(paths_to_remove)
+        processed = 0
+        if progress_callback:
+            progress_callback(processed, total_work)
 
-        for prev_path in list(prev.keys()):
-            if prev_path not in indexed_paths:
-                ids = prev[prev_path].get("chunk_ids", [])
-                if ids:
-                    self.collection.delete(ids=ids)
-                removed += 1
+        for prev_path in sorted(paths_to_remove):
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("indexing cancelled")
+            ids = prev.get(prev_path, {}).get("chunk_ids", [])
+            if ids:
+                self.collection.delete(ids=ids)
+            current.pop(prev_path, None)
+            removed += 1
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, total_work)
 
-        for rel_path in relative_md_paths(self.settings.wiki_root):
-            rel = str(rel_path).replace('\\', '/')
-            full = self.settings.wiki_root / rel_path
+        pending: list[tuple[str, dict[str, Any], list[str], list[str], list[dict[str, Any]]]] = []
+        for rel in paths_to_visit:
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("indexing cancelled")
+            full = self.settings.wiki_root / PurePosixPath(rel)
             raw = full.read_text(encoding="utf-8")
-            parsed = frontmatter.loads(raw)
-            body = parsed.content
             digest = sha256_text(raw)
             old = prev.get(rel)
+            if old and old.get("hash") == digest and old.get("schema_version") == INDEX_SCHEMA_VERSION:
+                cached_evidence = old.get("evidence_items")
+                if cached_evidence is not None:
+                    evidence_report = evidence_inspector.inspect(
+                        list(cached_evidence),
+                        old.get("evidence_snapshot", {}),
+                        verification_updated=False,
+                    )
+                    if old.get("evidence_snapshot", {}) == evidence_report.snapshot:
+                        current[rel] = old
+                        processed += 1
+                        if progress_callback:
+                            progress_callback(processed, total_work)
+                        continue
+
+            parsed = frontmatter.loads(raw)
+            body = parsed.content
+            sections = parse_semantic_sections(body)
+            evidence_items = _list_items(sections.get("evidence", ""))
+            previous_evidence_snapshot = old.get("evidence_snapshot", {}) if old else {}
+            previous_verified = _normalise_date(old.get("frontmatter", {}).get("last_verified")) if old else None
+            current_verified = _normalise_date(parsed.metadata.get("last_verified"))
+            evidence_report = evidence_inspector.inspect(
+                evidence_items,
+                previous_evidence_snapshot,
+                verification_updated=bool(old and current_verified != previous_verified),
+            )
 
             doc_record = {
                 "hash": digest,
@@ -584,16 +996,15 @@ class KnowledgeIndex:
                 "links": extract_links(body),
                 "frontmatter": parsed.metadata,
                 "chunk_ids": [],
+                "evidence_snapshot": evidence_report.snapshot,
+                "evidence_summary": evidence_report.summary(),
+                "evidence_items": evidence_items,
             }
-
-            if old and old.get("hash") == digest and old.get("schema_version") == INDEX_SCHEMA_VERSION:
-                current[rel] = old
-                continue
 
             if old and old.get("chunk_ids"):
                 self.collection.delete(ids=old["chunk_ids"])
 
-            packet = self.compile_context_packet(rel, parsed.metadata, body)
+            packet = self.compile_context_packet(rel, parsed.metadata, body, evidence_report)
             packet_texts = [packet.index_text] if packet else []
             packet_ids = [f"{rel}::packet::0"] if packet else []
             packet_metadatas = []
@@ -604,35 +1015,21 @@ class KnowledgeIndex:
                         "chunk_id": "packet",
                         "record_type": "packet",
                         "section_rank": SECTION_PRIORITY["packet"],
+                        "note_status": str(parsed.metadata.get("status", "") or ""),
                         "context_packet": json.dumps(
-                            {
-                                "kind": packet.kind,
-                                "rule": packet.rule,
-                                "decision": packet.metadata.get("decision", ""),
-                                "rationale": packet.metadata.get("rationale", ""),
-                                "consequences": packet.metadata.get("consequences", ""),
-                                "confidence": packet.confidence,
-                                "source": packet.source,
-                                "last_verified": packet.last_verified,
-                                "needs_verification": packet.needs_verification,
-                                "applies_to": packet.applies_to,
-                                "do": packet.do,
-                                "do_not": packet.do_not,
-                                "summary": packet.metadata.get("summary", ""),
-                                "key_facts": packet.metadata.get("key_facts", []),
-                                "steps": packet.metadata.get("steps", []),
-                                "terms": packet.metadata.get("terms", []),
-                                "aliases": packet.metadata.get("aliases", []),
-                                "evidence": packet.evidence,
-                                "gaps": packet.gaps,
-                            },
+                            packet.metadata["context_packet"],
                             default=self._json_default,
                         ),
-                        **{key: _as_metadata_value(value) for key, value in packet.metadata.items() if key != "context_packet"},
                     }
                 )
 
-            chunk_texts = chunks(body, self.settings.chunk_size, self.settings.chunk_overlap)
+            raw_chunks = markdown_chunks(
+                body,
+                token_budget=min(self.settings.chunk_tokens, self.provider.max_input_tokens),
+                token_count=self.provider.token_count,
+                split_to_token_windows=self.provider.split_to_token_windows,
+            )
+            chunk_texts = [chunk.text for chunk in raw_chunks]
             chunk_ids = [f"{rel}::chunk::{idx}" for idx in range(len(chunk_texts))]
             chunk_metadatas = [
                 {
@@ -641,30 +1038,114 @@ class KnowledgeIndex:
                     "content_hash": digest,
                     "record_type": "chunk",
                     "section_rank": SECTION_PRIORITY["raw"],
+                    "note_status": str(parsed.metadata.get("status", "") or ""),
+                    "heading_path": " > ".join(chunk.heading_path),
+                    "section_id": chunk.section_id,
                 }
-                for idx in range(len(chunk_texts))
+                for idx, chunk in enumerate(raw_chunks)
             ]
             index_ids = packet_ids + chunk_ids
             index_texts = packet_texts + chunk_texts
             index_metadatas = packet_metadatas + chunk_metadatas
-            vectors = self.provider.embed(index_texts) if index_texts else []
-            if index_ids:
-                self.collection.add(ids=index_ids, embeddings=vectors, documents=index_texts, metadatas=index_metadatas)
-
             doc_record["chunk_ids"] = index_ids
             current[rel] = doc_record
+            pending.append((rel, doc_record, index_ids, index_texts, index_metadatas))
             changed += 1
+            processed += 1
+            if progress_callback:
+                progress_callback(processed, total_work)
+
+        flat_ids: list[str] = []
+        flat_texts: list[str] = []
+        flat_metadatas: list[dict[str, Any]] = []
+        for _, _, ids, texts, metadatas in pending:
+            flat_ids.extend(ids)
+            flat_texts.extend(texts)
+            flat_metadatas.extend(metadatas)
+        batch_size = int(getattr(self.settings, "embedding_batch_size", 64))
+        for start in range(0, len(flat_texts), batch_size):
+            if cancel_event and cancel_event.is_set():
+                raise RuntimeError("indexing cancelled")
+            texts = flat_texts[start : start + batch_size]
+            vectors = self.provider.embed(texts)
+            self.collection.add(
+                ids=flat_ids[start : start + batch_size],
+                embeddings=vectors,
+                documents=texts,
+                metadatas=flat_metadatas[start : start + batch_size],
+            )
 
         manifest["files"] = current
         self._write_manifest(manifest)
-        return {"changed": changed, "removed": removed, "total_files": len(current)}
+        return {
+            "changed": changed,
+            "removed": removed,
+            "total_files": len(current),
+            "scanned": len(paths_to_visit),
+            "mode": "targeted" if target_paths is not None else "full",
+        }
 
-    def search(self, query: str, top_k: int | None = None) -> list[SearchResult]:
-        k = top_k if top_k is not None and top_k > 0 else self.settings.top_k
+    @staticmethod
+    def _select_ranked_candidates(
+        candidates: list[SearchCandidate],
+        k: int,
+        include_inactive: bool = False,
+        min_relevance: float = 0.0,
+    ) -> list[SearchCandidate]:
+        eligible = [
+            candidate
+            for candidate in candidates
+            if (include_inactive or candidate.note_status not in INACTIVE_NOTE_STATUSES)
+            and candidate.ranking_score >= min_relevance
+        ]
+        eligible.sort(
+            key=lambda candidate: (
+                -candidate.ranking_score,
+                -candidate.semantic_score,
+                candidate.source_file,
+                candidate.record_type,
+                candidate.chunk_idx,
+            )
+        )
+
+        selected: list[SearchCandidate] = []
+        selected_ids: set[int] = set()
+        source_counts: dict[str, int] = {}
+
+        # First pass preserves source diversity using each source's best result.
+        for candidate in eligible:
+            if candidate.source_file in source_counts:
+                continue
+            selected.append(candidate)
+            selected_ids.add(id(candidate))
+            source_counts[candidate.source_file] = 1
+            if len(selected) >= k:
+                return selected
+
+        # Second pass adds at most one supporting result from an already selected source.
+        for candidate in eligible:
+            if id(candidate) in selected_ids:
+                continue
+            if source_counts.get(candidate.source_file, 0) >= MAX_RESULTS_PER_SOURCE:
+                continue
+            selected.append(candidate)
+            source_counts[candidate.source_file] = source_counts.get(candidate.source_file, 0) + 1
+            if len(selected) >= k:
+                break
+        return selected
+
+    def search(
+        self,
+        query: str,
+        top_k: int | None = None,
+        include_inactive: bool = False,
+    ) -> list[SearchResult]:
+        requested_k = top_k if top_k is not None and top_k > 0 else self.settings.top_k
+        k = min(requested_k, int(getattr(self.settings, "max_top_k", 20)))
         vector = self.provider.embed([query])[0]
         res = self.collection.query(
             query_embeddings=[vector],
-            n_results=max(k * 3, k),
+            n_results=min(max(k * 3, k), 60),
             include=["documents", "metadatas", "distances"],
         )
 
@@ -673,7 +1154,7 @@ class KnowledgeIndex:
         metas = res.get("metadatas", [[]])[0]
         distances = res.get("distances", [[]])[0]
 
-        raw: list[tuple[str, int, float, str, str, dict[str, Any] | None, dict[str, Any]]] = []
+        candidates: list[SearchCandidate] = []
         for i, chunk_id in enumerate(ids):
             score = 1.0 - float(distances[i]) if i < len(distances) else 0.0
             meta = metas[i] if i < len(metas) else {}
@@ -696,41 +1177,45 @@ class KnowledgeIndex:
                     packet = json.loads(str(packet_raw)) if packet_raw else None
                 except (TypeError, ValueError, json.JSONDecodeError):
                     packet = None
-            raw.append(
-                (
-                    source_file,
-                    chunk_idx,
-                    score,
-                    str(doc_text),
-                    record_type,
-                    packet,
-                    meta,
+            candidates.append(
+                SearchCandidate(
+                    source_file=source_file,
+                    chunk_idx=chunk_idx,
+                    semantic_score=score,
+                    context=str(doc_text),
+                    record_type=record_type,
+                    packet=packet,
+                    metadata=meta,
                 )
             )
 
-        raw.sort(key=lambda item: (SECTION_PRIORITY.get(item[4], SECTION_PRIORITY["raw"]), -item[2]))
-        raw = raw[:k]
+        ranked = self._select_ranked_candidates(
+            candidates,
+            k,
+            include_inactive,
+            self.settings.min_relevance,
+        )
 
         if self.settings.merge_adjacent_window <= 0:
             return [
                 SearchResult(
-                    source_file=source_file,
-                    chunk_id=str(chunk_idx),
-                    score=score,
-                    context=context,
-                    record_type=record_type,
-                    context_packet=packet,
-                    metadata=meta,
+                    source_file=candidate.source_file,
+                    chunk_id=str(candidate.chunk_idx),
+                    score=candidate.ranking_score,
+                    context=candidate.context,
+                    record_type=candidate.record_type,
+                    context_packet=candidate.packet,
+                    metadata=candidate.metadata,
                 )
-                for source_file, chunk_idx, score, context, record_type, packet, meta in raw
+                for candidate in ranked
             ]
 
         needed_ids: set[str] = set()
-        for source_file, chunk_idx, _, _, record_type, _, _ in raw:
-            if record_type != "chunk":
+        for candidate in ranked:
+            if candidate.record_type != "chunk":
                 continue
-            for idx in range(max(0, chunk_idx - self.settings.merge_adjacent_window), chunk_idx + self.settings.merge_adjacent_window + 1):
-                needed_ids.add(f"{source_file}::chunk::{idx}")
+            for idx in range(max(0, candidate.chunk_idx - self.settings.merge_adjacent_window), candidate.chunk_idx + self.settings.merge_adjacent_window + 1):
+                needed_ids.add(f"{candidate.source_file}::chunk::{idx}")
 
         neighbor_docs: dict[str, str] = {}
         if needed_ids:
@@ -742,38 +1227,42 @@ class KnowledgeIndex:
                     neighbor_docs[str(doc_id)] = str(fetched_docs[i])
 
         out: list[SearchResult] = []
-        for source_file, chunk_idx, score, context, record_type, packet, meta in raw:
-            if record_type != "chunk":
+        for candidate in ranked:
+            if candidate.record_type != "chunk":
                 out.append(
                     SearchResult(
-                        source_file=source_file,
+                        source_file=candidate.source_file,
                         chunk_id="packet",
-                        score=score,
-                        context=packet["rule"] if packet and packet.get("rule") else context,
-                        record_type=record_type,
-                        context_packet=packet,
-                        metadata=meta,
+                        score=candidate.ranking_score,
+                        context=candidate.packet["rule"] if candidate.packet and candidate.packet.get("rule") else candidate.context,
+                        record_type=candidate.record_type,
+                        context_packet=candidate.packet,
+                        metadata=candidate.metadata,
                     )
                 )
                 continue
 
             merged_parts: list[str] = []
-            for idx in range(max(0, chunk_idx - self.settings.merge_adjacent_window), chunk_idx + self.settings.merge_adjacent_window + 1):
-                doc_id = f"{source_file}::chunk::{idx}"
+            for idx in range(max(0, candidate.chunk_idx - self.settings.merge_adjacent_window), candidate.chunk_idx + self.settings.merge_adjacent_window + 1):
+                doc_id = f"{candidate.source_file}::chunk::{idx}"
                 text = neighbor_docs.get(doc_id)
                 if text:
                     merged_parts.append(text)
 
-            merged_context = "\n...\n".join(merged_parts) if merged_parts else context
+            merged_context = (
+                merge_contexts_without_overlap(merged_parts)
+                if merged_parts
+                else candidate.context
+            )
             out.append(
                 SearchResult(
-                    source_file=source_file,
-                    chunk_id=str(chunk_idx),
-                    score=score,
+                    source_file=candidate.source_file,
+                    chunk_id=str(candidate.chunk_idx),
+                    score=candidate.ranking_score,
                     context=merged_context,
-                    record_type=record_type,
-                    context_packet=packet,
-                    metadata=meta,
+                    record_type=candidate.record_type,
+                    context_packet=candidate.packet,
+                    metadata=candidate.metadata,
                 )
             )
         return out
@@ -782,16 +1271,178 @@ class KnowledgeIndex:
         manifest = self._read_manifest()
         return sorted(manifest.get("files", {}).keys())
 
-    def read_doc(self, rel_path: str) -> str:
-        target = (self.settings.wiki_root / rel_path).resolve()
-        if not str(target).startswith(str(self.settings.wiki_root.resolve())):
-            raise ValueError("path must stay within wiki root")
-        return target.read_text(encoding="utf-8")
+    def _resolve_wiki_markdown_path(self, rel_path: str) -> Path:
+        if not isinstance(rel_path, str) or not rel_path.strip():
+            raise ValueError("path must be a non-empty relative Markdown path")
 
-    def write_doc(self, rel_path: str, content: str) -> None:
-        target = (self.settings.wiki_root / rel_path).resolve()
-        if not str(target).startswith(str(self.settings.wiki_root.resolve())):
-            raise ValueError("path must stay within wiki root")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        portable_path = rel_path.replace("\\", "/")
+        posix_path = PurePosixPath(portable_path)
+        windows_path = PureWindowsPath(rel_path)
+        if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive:
+            raise ValueError("absolute paths are not allowed")
+        if any(part in {".", ".."} or part.startswith(".") for part in posix_path.parts):
+            raise ValueError("hidden paths and traversal segments are not allowed")
+        if posix_path.suffix != ".md":
+            raise ValueError("path must target a .md Markdown document")
+
+        wiki_root = self.settings.wiki_root.resolve()
+        target = (wiki_root / Path(*posix_path.parts)).resolve()
+        try:
+            target.relative_to(wiki_root)
+        except ValueError as error:
+            raise ValueError("path must stay within the canonical wiki root") from error
+        return target
+
+    def read_doc(self, rel_path: str) -> dict[str, str]:
+        target = self._resolve_wiki_markdown_path(rel_path)
+        content = target.read_text(encoding="utf-8")
+        return {
+            "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
+            "content": content,
+            "content_hash": sha256_text(content),
+        }
+
+    def write_doc(
+        self,
+        rel_path: str,
+        content: str,
+        expected_hash: str | None = None,
+    ) -> dict[str, Any]:
+        target = self._resolve_wiki_markdown_path(rel_path)
+        with self._write_lock:
+            current_content = target.read_text(encoding="utf-8") if target.exists() else None
+            current_hash = sha256_text(current_content) if current_content is not None else None
+            if current_content is not None and expected_hash is None:
+                return {
+                    "status": "conflict",
+                    "reason": "expected_hash_required",
+                    "path": rel_path.replace("\\", "/"),
+                    "current_hash": current_hash,
+                }
+            if expected_hash is not None and expected_hash != current_hash:
+                return {
+                    "status": "conflict",
+                    "reason": "hash_mismatch",
+                    "path": rel_path.replace("\\", "/"),
+                    "expected_hash": expected_hash,
+                    "current_hash": current_hash,
+                }
+
+            atomic_write_text(target, content)
+            return {
+                "status": "ok",
+                "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
+                "previous_hash": current_hash,
+                "content_hash": sha256_text(content),
+            }
+
+    @staticmethod
+    def _link_targets_path(link: str, rel_path: str) -> bool:
+        # Wikilinks may include a display alias or a heading/block fragment.
+        # Neither changes the note path that must be protected from rename/delete.
+        normalized = link.split("|", 1)[0].split("#", 1)[0]
+        normalized = normalized.strip().replace("\\", "/").strip("/")
+        target = rel_path.replace("\\", "/").strip("/")
+        return normalized in {target, str(PurePosixPath(target).with_suffix(""))}
+
+    def _inbound_links(self, rel_path: str) -> list[str]:
+        inbound: list[str] = []
+        canonical = rel_path.replace("\\", "/")
+        for candidate in relative_md_paths(self.settings.wiki_root):
+            candidate_rel = candidate.as_posix()
+            if candidate_rel == canonical:
+                continue
+            body = (self.settings.wiki_root / candidate).read_text(encoding="utf-8")
+            if any(self._link_targets_path(link, canonical) for link in extract_links(body)):
+                inbound.append(candidate_rel)
+        return inbound
+
+    def delete_doc(self, rel_path: str, expected_hash: str) -> dict[str, Any]:
+        target = self._resolve_wiki_markdown_path(rel_path)
+        with self._write_lock:
+            if not target.exists():
+                return {
+                    "status": "conflict",
+                    "reason": "not_found",
+                    "path": rel_path.replace("\\", "/"),
+                    "current_hash": None,
+                }
+            current_content = target.read_text(encoding="utf-8")
+            current_hash = sha256_text(current_content)
+            if expected_hash != current_hash:
+                return {
+                    "status": "conflict",
+                    "reason": "hash_mismatch",
+                    "path": rel_path.replace("\\", "/"),
+                    "expected_hash": expected_hash,
+                    "current_hash": current_hash,
+                }
+            inbound_links = self._inbound_links(rel_path)
+            if inbound_links:
+                return {
+                    "status": "conflict",
+                    "reason": "inbound_links_exist",
+                    "path": rel_path.replace("\\", "/"),
+                    "current_hash": current_hash,
+                    "inbound_links": inbound_links,
+                }
+            target.unlink()
+            return {
+                "status": "ok",
+                "path": rel_path.replace("\\", "/"),
+                "deleted_hash": current_hash,
+            }
+
+    def rename_doc(
+        self,
+        source_path: str,
+        destination_path: str,
+        expected_hash: str,
+    ) -> dict[str, Any]:
+        source = self._resolve_wiki_markdown_path(source_path)
+        destination = self._resolve_wiki_markdown_path(destination_path)
+        with self._write_lock:
+            if not source.exists():
+                return {
+                    "status": "conflict",
+                    "reason": "not_found",
+                    "source_path": source_path.replace("\\", "/"),
+                    "current_hash": None,
+                }
+            current_content = source.read_text(encoding="utf-8")
+            current_hash = sha256_text(current_content)
+            if expected_hash != current_hash:
+                return {
+                    "status": "conflict",
+                    "reason": "hash_mismatch",
+                    "source_path": source_path.replace("\\", "/"),
+                    "expected_hash": expected_hash,
+                    "current_hash": current_hash,
+                }
+            if destination.exists():
+                destination_content = destination.read_text(encoding="utf-8")
+                return {
+                    "status": "conflict",
+                    "reason": "destination_exists",
+                    "source_path": source_path.replace("\\", "/"),
+                    "destination_path": destination_path.replace("\\", "/"),
+                    "destination_hash": sha256_text(destination_content),
+                }
+            inbound_links = self._inbound_links(source_path)
+            if inbound_links:
+                return {
+                    "status": "conflict",
+                    "reason": "inbound_links_exist",
+                    "source_path": source_path.replace("\\", "/"),
+                    "current_hash": current_hash,
+                    "inbound_links": inbound_links,
+                }
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, destination)
+            return {
+                "status": "ok",
+                "source_path": source_path.replace("\\", "/"),
+                "destination_path": destination.relative_to(self.settings.wiki_root.resolve()).as_posix(),
+                "content_hash": current_hash,
+            }
 

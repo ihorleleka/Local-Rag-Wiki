@@ -1,0 +1,57 @@
+{
+  "generated_utc": "2026-07-18T11:39:43.508357+00:00",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.41",
+  "python": "3.14.6",
+  "provider": "deterministic-64d",
+  "notes": "Developer baseline only; timings are not routine CI thresholds.",
+  "measurements": [
+    {
+      "notes": 20,
+      "initial_seconds": 0.071263,
+      "unchanged_seconds": 0.005085,
+      "targeted_seconds": 0.030091,
+      "search_seconds": 0.006904,
+      "initial_changed": 20,
+      "unchanged_changed": 0,
+      "targeted_changed": 1,
+      "targeted_scanned": 1,
+      "search_results": 20
+    },
+    {
+      "notes": 100,
+      "initial_seconds": 0.279904,
+      "unchanged_seconds": 0.007218,
+      "targeted_seconds": 0.038788,
+      "search_seconds": 0.013318,
+      "initial_changed": 100,
+      "unchanged_changed": 0,
+      "targeted_changed": 1,
+      "targeted_scanned": 1,
+      "search_results": 20
+    },
+    {
+      "notes": 500,
+      "initial_seconds": 1.784425,
+      "unchanged_seconds": 0.021854,
+      "targeted_seconds": 0.087239,
+      "search_seconds": 0.021342,
+      "initial_changed": 500,
+      "unchanged_changed": 0,
+      "targeted_changed": 1,
+      "targeted_scanned": 1,
+      "search_results": 20
+    },
+    {
+      "notes": 1000,
+      "initial_seconds": 3.476404,
+      "unchanged_seconds": 0.04872,
+      "targeted_seconds": 0.102625,
+      "search_seconds": 0.021786,
+      "initial_changed": 1000,
+      "unchanged_changed": 0,
+      "targeted_changed": 1,
+      "targeted_scanned": 1,
+      "search_results": 20
+    }
+  ]
+}

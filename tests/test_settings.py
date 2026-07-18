@@ -16,11 +16,14 @@ from kb_service.settings import Settings
 
 
 @contextmanager
-def temporary_env(**updates: str) -> None:
+def temporary_env(**updates: str | None) -> None:
     original: dict[str, str | None] = {key: os.environ.get(key) for key in updates}
     try:
         for key, value in updates.items():
-            os.environ[key] = value
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
         yield
     finally:
         for key, value in original.items():
@@ -38,17 +41,24 @@ class SettingsTests(unittest.TestCase):
             KB_MCP_PATH="mcp",
             KB_HEALTH_PATH="health",
             KB_PORT="7331",
+            KB_REPOSITORY_ROOT=None,
         ):
             settings = Settings.load()
 
         self.assertTrue(str(settings.wiki_root).endswith("wiki"))
+        self.assertEqual(settings.repository_root, settings.wiki_root.parent)
         self.assertTrue(str(settings.kb_root).endswith("kb"))
         self.assertEqual(settings.mcp_path, "/mcp/")
         self.assertEqual(settings.health_path, "health")
         self.assertEqual(settings.host, "0.0.0.0")
         self.assertEqual(settings.port, 7331)
         self.assertEqual(settings.staleness_days, 90)
+        self.assertEqual(settings.chunk_tokens, 220)
+        self.assertEqual(settings.min_relevance, 0.35)
+        self.assertEqual(settings.max_top_k, 20)
+        self.assertEqual(settings.embedding_batch_size, 64)
         self.assertEqual(settings.note_max_lines, 200)
+        self.assertEqual(settings.evidence_max_anchors, 12)
         self.assertEqual(settings.startup_reindex_timeout_seconds, 3)
 
 
