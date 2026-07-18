@@ -63,7 +63,7 @@ class EvidenceReport:
     def state(self) -> str:
         if self.missing_targets:
             return "missing"
-        if self.changed_targets or any(anchor.working_tree_state != "clean" for anchor in self.anchors):
+        if self.changed_targets:
             return "changed_since_verification"
         return "present" if self.declared_count else "missing"
 
@@ -191,7 +191,7 @@ class EvidenceInspector:
         for rel in sorted(files):
             identity = self._tracked.get(rel)
             full = self.repository_root / Path(*PurePosixPath(rel).parts)
-            if identity is None and full.is_file():
+            if full.is_file() and (identity is None or rel in self._dirty):
                 identity = hashlib.sha256(full.read_bytes()).hexdigest()
             identities.append(f"{rel}:{identity or 'missing'}")
         return hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest() if identities else ""
@@ -199,11 +199,21 @@ class EvidenceInspector:
     def _matching_files(self, kind: str, target: str) -> tuple[list[str], bool]:
         full = self.repository_root / Path(*PurePosixPath(target).parts)
         if kind == "glob":
-            matches = sorted(rel for rel in self._tracked if fnmatch.fnmatch(rel, target))
+            matches = sorted(
+                rel
+                for rel in set(self._tracked) | self._dirty
+                if fnmatch.fnmatch(rel, target)
+                and (self.repository_root / Path(*PurePosixPath(rel).parts)).is_file()
+            )
             return matches, bool(matches)
         if full.is_dir() or kind == "dir":
             prefix = target.rstrip("/") + "/"
-            matches = sorted(rel for rel in self._tracked if rel.startswith(prefix))
+            matches = sorted(
+                rel
+                for rel in set(self._tracked) | self._dirty
+                if rel.startswith(prefix)
+                and (self.repository_root / Path(*PurePosixPath(rel).parts)).is_file()
+            )
             return matches, full.is_dir()
         return [target], full.is_file()
 
@@ -259,11 +269,12 @@ class EvidenceInspector:
             for key, value in previous_snapshot.items():
                 if key not in preliminary.snapshot:
                     changed.append(str(value.get("target", key)))
-        changed.extend(
-            anchor.target
-            for anchor in anchors
-            if anchor.working_tree_state != "clean"
-        )
+        elif not previous_snapshot and not verification_updated:
+            changed.extend(
+                anchor.target
+                for anchor in anchors
+                if anchor.working_tree_state != "clean"
+            )
         return EvidenceReport(
             declared_count=len(items),
             anchors=tuple(anchors),

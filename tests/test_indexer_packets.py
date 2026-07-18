@@ -610,6 +610,61 @@ Partial behavior.
             3,
         )
 
+    def test_schema_report_compares_evidence_with_the_accepted_manifest_snapshot(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            wiki_root = root / "wiki"
+            wiki_root.mkdir()
+            (wiki_root / "Current.md").write_text(
+                """# Current
+
+## Summary
+Current behavior.
+
+## Key facts
+- One fact.
+
+## Evidence
+- README.md
+
+## Retrieval hints
+- current behavior
+""",
+                encoding="utf-8",
+            )
+            settings = types.SimpleNamespace(
+                wiki_root=wiki_root,
+                kb_root=root / "kb",
+                repository_root=root,
+                embedding_model="dummy",
+                staleness_days=90,
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+            accepted_snapshot = {
+                "path:README.md#": {
+                    "kind": "path",
+                    "target": "README.md",
+                    "locator": "",
+                    "exists": True,
+                    "identity": "accepted",
+                    "working_tree_state": "modified_or_untracked",
+                }
+            }
+            index._write_manifest(
+                {"files": {"Current.md": {"evidence_snapshot": accepted_snapshot}}}
+            )
+
+            with patch.object(self.indexer_module, "EvidenceInspector") as inspector_type:
+                inspector_type.return_value.inspect.return_value = (
+                    self.indexer_module.declared_evidence_report(["README.md"])
+                )
+                index.schema_report()
+
+            inspector_type.return_value.inspect.assert_called_once_with(
+                ["README.md"],
+                accepted_snapshot,
+            )
+
     def test_schema_report_flags_legacy_schema_and_link_gaps(self) -> None:
         with TemporaryDirectory() as tmpdir:
             wiki_root = Path(tmpdir) / "wiki"

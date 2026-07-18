@@ -80,6 +80,32 @@ class EvidenceInspectorTests(unittest.TestCase):
             self.assertEqual(committed.state, "changed_since_verification")
             self.assertEqual(committed.changed_targets, ("src/Owner.cs",))
 
+    def test_explicit_verification_snapshots_dirty_bytes_and_detects_later_edits(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_repository(root)
+            clean = EvidenceInspector(root).inspect(["src/Owner.cs"])
+            (root / "src" / "Owner.cs").write_text(
+                "class Owner { int Version = 2; }\n", encoding="utf-8"
+            )
+
+            inspector = EvidenceInspector(root)
+            dirty = inspector.inspect(["src/Owner.cs"], clean.snapshot)
+            accepted = inspector.inspect(
+                ["src/Owner.cs"], clean.snapshot, verification_updated=True
+            )
+            (root / "src" / "Owner.cs").write_text(
+                "class Owner { int Version = 3; }\n", encoding="utf-8"
+            )
+            changed_again = EvidenceInspector(root).inspect(
+                ["src/Owner.cs"], accepted.snapshot
+            )
+
+            self.assertEqual(dirty.state, "changed_since_verification")
+            self.assertEqual(accepted.state, "present")
+            self.assertEqual(accepted.anchors[0].working_tree_state, "modified_or_untracked")
+            self.assertEqual(changed_again.state, "changed_since_verification")
+
     def test_fresh_clone_does_not_use_checkout_mtime_as_drift(self) -> None:
         with TemporaryDirectory() as tmpdir:
             base = Path(tmpdir)

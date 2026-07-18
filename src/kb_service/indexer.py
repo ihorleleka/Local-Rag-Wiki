@@ -647,6 +647,7 @@ class KnowledgeIndex:
 
     def schema_report(self) -> dict[str, Any]:
         indexed_paths = {str(p).replace("\\", "/") for p in relative_md_paths(self.settings.wiki_root)}
+        manifest_files = self._read_manifest().get("files", {})
         records: list[dict[str, Any]] = []
         id_counts: dict[str, int] = {}
         max_note_lines = max(1, int(getattr(self.settings, "note_max_lines", DEFAULT_NOTE_MAX_LINES)))
@@ -664,7 +665,11 @@ class KnowledgeIndex:
             parsed = frontmatter.loads(raw)
             body = parsed.content
             sections = parse_semantic_sections(body)
-            evidence_report = evidence_inspector.inspect(_list_items(sections.get("evidence", "")))
+            previous_snapshot = manifest_files.get(rel, {}).get("evidence_snapshot", {})
+            evidence_report = evidence_inspector.inspect(
+                _list_items(sections.get("evidence", "")),
+                previous_snapshot,
+            )
             kind, explicit_kind = _normalise_kind(parsed.metadata.get("kind"), sections)
             links = extract_links(body)
             note_id = str(parsed.metadata.get("id", "") or "").strip()
