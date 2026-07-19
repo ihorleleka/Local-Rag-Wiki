@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import sys
+import threading
 import types
 import unittest
 from threading import Lock
@@ -228,6 +229,54 @@ class AppBehaviorTests(unittest.TestCase):
                 self.assertEqual(health["status"], "ok")
                 self.assertEqual(health["service"], "ready")
                 self.assertEqual(health["mcp"], "running")
+
+        asyncio.run(run_health())
+
+    def test_health_reports_starting_during_long_initial_index(self) -> None:
+        release_reindex = threading.Event()
+
+        class SlowStartingIndex(DummyKnowledgeIndex):
+            def reindex(self, *, cancel_event=None, progress_callback=None):
+                if progress_callback is not None:
+                    progress_callback(0, 1)
+                while not release_reindex.is_set():
+                    if cancel_event is not None and cancel_event.is_set():
+                        return {"changed": 0, "removed": 0, "total_files": 0}
+                    __import__("time").sleep(0.01)
+                if progress_callback is not None:
+                    progress_callback(1, 1)
+                return {"changed": 1, "removed": 0, "total_files": 1}
+
+        settings = types.SimpleNamespace(
+            wiki_root=Path("wiki"),
+            repository_root=Path("."),
+            kb_root=Path("kb"),
+            host="0.0.0.0",
+            port=7331,
+            mcp_path="/mcp/",
+            health_path="/health",
+            embedding_model="all-MiniLM-L6-v2",
+            chunk_size=500,
+            chunk_overlap=150,
+            top_k=8,
+            merge_adjacent_window=1,
+            staleness_days=90,
+            watch_interval_seconds=15,
+            startup_reindex_timeout_seconds=1,
+        )
+        self.app_module.Settings.load = staticmethod(lambda: settings)
+        original_index_class = self.app_module.KnowledgeIndex
+        self.app_module.KnowledgeIndex = SlowStartingIndex
+        app = self.app_module.create_app()
+        self.app_module.KnowledgeIndex = original_index_class
+
+        async def run_health():
+            async with app.lifespan(app):
+                health = await app.routes[("GET", "/health")]()
+                self.assertEqual(health["status"], "starting")
+                self.assertEqual(health["service"], "indexing")
+                self.assertEqual(health["mcp"], "running")
+                release_reindex.set()
 
         asyncio.run(run_health())
 
@@ -530,8 +579,16 @@ class IndexMutationCoordinatorTests(unittest.TestCase):
     def test_health_degrades_after_repeated_failures_even_with_prior_success(self) -> None:
         healthy_state = {"last_success_utc": "2026-07-18T00:00:00+00:00", "consecutive_failures": 1}
         failing_state = {**healthy_state, "consecutive_failures": 2}
+        starting_state = {
+            "last_success_utc": "",
+            "consecutive_failures": 0,
+            "indexing_state": "indexing",
+            "last_error": "",
+        }
 
         self.assertTrue(self.app_module.service_is_healthy(healthy_state, True))
+        self.assertTrue(self.app_module.service_is_starting(starting_state, True))
+        self.assertEqual(self.app_module.health_status(starting_state, True), ("starting", 200))
         self.assertFalse(self.app_module.service_is_healthy(failing_state, True))
         self.assertFalse(self.app_module.service_is_healthy(healthy_state, False))
 

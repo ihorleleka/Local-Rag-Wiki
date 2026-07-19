@@ -241,9 +241,11 @@ older manifest lacks dependency metadata. Embeddings are written in bounded
 batches, and caller-supplied result counts cannot exceed `KB_MAX_TOP_K`.
 
 The health payload includes `progress_processed` and `progress_total` while
-indexing. Index work runs outside the async request loop and supports cooperative
-cancellation during shutdown, so MCP requests remain responsive during a long
-pass.
+indexing. During the first long startup pass it returns HTTP `200` with
+`"status": "starting"` once the MCP session manager is up, then transitions to
+`"status": "ok"` after the first successful reindex. Index work runs outside
+the async request loop and supports cooperative cancellation during shutdown, so
+MCP requests remain responsive during a long pass.
 
 The deterministic 20/100/500/1,000-note developer benchmark is deliberately
 excluded from routine CI. Refresh its checked-in machine-specific baseline when
@@ -322,12 +324,14 @@ Set these repository settings before using the workflow:
 - Health: `GET /health`
 - MCP: `POST /mcp/` (also mounted at `/mcp`)
 
-The health response is `200` only after at least one successful reindex and
-while the MCP session manager is running. It exposes `indexing_state`,
-`last_success_utc`, `last_failure_utc`, `last_error`,
+The health response is `200` while startup indexing is still in progress and
+the MCP session manager is running, with `"status": "starting"`. After the
+first successful reindex it returns `"status": "ok"`. It exposes
+`indexing_state`, `last_success_utc`, `last_failure_utc`, `last_error`,
 `consecutive_failures`, and `indexed_revision`. Startup, watcher, and
-write-triggered mutations share one coalescing worker; two consecutive failures
-degrade health, and a later successful watcher pass restores it.
+write-triggered mutations share one coalescing worker; a startup failure, an
+offline MCP session manager, or two consecutive post-startup failures return
+HTTP `503`, and a later successful watcher pass restores health.
 
 ## License
 

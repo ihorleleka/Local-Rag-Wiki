@@ -224,6 +224,23 @@ def service_is_healthy(index_state: dict[str, Any], mcp_running: bool) -> bool:
     )
 
 
+def service_is_starting(index_state: dict[str, Any], mcp_running: bool) -> bool:
+    return (
+        mcp_running
+        and not index_state["last_success_utc"]
+        and index_state["indexing_state"] in {"starting", "indexing"}
+        and not index_state["last_error"]
+    )
+
+
+def health_status(index_state: dict[str, Any], mcp_running: bool) -> tuple[str, int]:
+    if service_is_healthy(index_state, mcp_running):
+        return "ok", 200
+    if service_is_starting(index_state, mcp_running):
+        return "starting", 200
+    return "degraded", 503
+
+
 def service_version() -> str:
     try:
         return version("kb-service")
@@ -326,9 +343,9 @@ def create_app():
     async def health():
         index_state = coordinator.snapshot()
         ready = bool(index_state["last_success_utc"])
-        healthy = service_is_healthy(index_state, mcp_runtime["running"])
+        status, status_code = health_status(index_state, mcp_runtime["running"])
         payload = {
-            "status": "ok" if healthy else "degraded",
+            "status": status,
             "service": "ready" if ready else index_state["indexing_state"],
             "mcp": "running" if mcp_runtime["running"] else "stopped",
             "wiki_root": str(settings.wiki_root),
@@ -338,10 +355,10 @@ def create_app():
             "watch_interval_seconds": str(settings.watch_interval_seconds),
             **index_state,
         }
-        if healthy:
+        if status_code == 200:
             return payload
         return JSONResponse(
-            status_code=503,
+            status_code=status_code,
             content={
                 **payload,
             },
