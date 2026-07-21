@@ -118,6 +118,9 @@ blob identities plus working-tree state in the manifest, and reindexes a note
 when a declared anchor changes. Checkout mtimes are not used. Missing files,
 directories, symbols, and tests are reported explicitly; commands are recorded
 but never executed by evidence inspection.
+Warning-only Git stderr for line-ending normalization (LF/CRLF conversion
+notices) is treated as non-fatal so consumer repositories with different local
+Git/editor defaults do not break evidence snapshots.
 
 Plain repository-relative paths remain compatible. Typed anchors may use
 `path:`, `dir:`, `glob:`, `symbol: path#Name`, `test: path::TestName`, or
@@ -186,6 +189,10 @@ does not overwrite the newer note or trigger reindexing.
 Successful note and manifest writes are staged beside their targets, flushed,
 and atomically replaced. The service reindexes after each successful wiki
 write and regenerates derived packet records automatically.
+
+The repository enforces consistent line endings (`LF` for text) through
+`.gitattributes` and `.editorconfig` to avoid warning-only Git output causing
+downstream tooling instability around write/checkpoint flows.
 
 Use `wiki_delete(path, expected_hash)` or
 `wiki_rename(source_path, destination_path, expected_hash)` for structural wiki

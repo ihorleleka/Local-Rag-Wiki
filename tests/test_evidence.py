@@ -33,6 +33,43 @@ def make_repository(root: Path) -> None:
 
 
 class EvidenceInspectorTests(unittest.TestCase):
+    def test_line_ending_warning_only_git_stderr_is_treated_as_non_fatal(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            warning = (
+                "warning: in the working copy of 'wiki/Note.md', "
+                "LF will be replaced by CRLF the next time Git touches it\n"
+            )
+            completed = subprocess.CompletedProcess(
+                args=["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+                returncode=1,
+                stdout="",
+                stderr=warning,
+            )
+            with patch("kb_service.evidence.subprocess.run", return_value=completed):
+                result = EvidenceInspector(root)._git("status", "--porcelain=v1", "--untracked-files=all")
+
+            self.assertEqual(result.returncode, 0)
+
+    def test_mixed_warning_and_error_stderr_remains_fatal(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            stderr = (
+                "warning: in the working copy of 'wiki/Note.md', "
+                "LF will be replaced by CRLF the next time Git touches it\n"
+                "fatal: not a git repository (or any of the parent directories): .git\n"
+            )
+            completed = subprocess.CompletedProcess(
+                args=["git", "-C", str(root), "status", "--porcelain=v1", "--untracked-files=all"],
+                returncode=1,
+                stdout="",
+                stderr=stderr,
+            )
+            with patch("kb_service.evidence.subprocess.run", return_value=completed):
+                result = EvidenceInspector(root)._git("status", "--porcelain=v1", "--untracked-files=all")
+
+            self.assertEqual(result.returncode, 1)
+
     def test_non_git_environment_falls_back_without_crashing(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

@@ -12,6 +12,10 @@ from typing import Any
 BACKTICK_PATTERN = re.compile(r"`([^`]+)`")
 EXPLICIT_PATTERN = re.compile(r"^(path|dir|glob|symbol|test|generated):\s*(.+)$", re.IGNORECASE)
 COMMAND_PREFIXES = ("dotnet ", "npm ", "node ", "python ", "docker ", "aspire ", "git ")
+LINE_ENDING_WARNING_MARKERS = (
+    "lf will be replaced by crlf",
+    "crlf will be replaced by lf",
+)
 KNOWN_FILE_SUFFIXES = {
     ".cs", ".csproj", ".config", ".css", ".html", ".js", ".json", ".jsonc",
     ".md", ".mjs", ".props", ".ps1", ".py", ".razor", ".sh", ".sln", ".slnx",
@@ -104,15 +108,35 @@ class EvidenceInspector:
 
     def _git(self, *args: str) -> subprocess.CompletedProcess[str]:
         try:
-            return subprocess.run(
+            result = subprocess.run(
                 ["git", "-C", str(self.repository_root), *args],
                 check=False,
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
             )
+            if result.returncode != 0 and self._is_line_ending_warning_only(result.stderr):
+                return subprocess.CompletedProcess(
+                    result.args,
+                    0,
+                    result.stdout,
+                    result.stderr,
+                )
+            return result
         except FileNotFoundError:
             return subprocess.CompletedProcess(["git", *args], 127, "", "git is unavailable")
+
+    @staticmethod
+    def _is_line_ending_warning_only(stderr: str) -> bool:
+        lines = [line.strip().lower() for line in stderr.splitlines() if line.strip()]
+        if not lines:
+            return False
+        for line in lines:
+            if not line.startswith("warning:"):
+                return False
+            if not any(marker in line for marker in LINE_ENDING_WARNING_MARKERS):
+                return False
+        return True
 
     def _tracked_blobs(self) -> dict[str, str]:
         result = self._git("ls-files", "-s")
