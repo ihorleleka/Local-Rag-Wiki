@@ -1,0 +1,9 @@
+servers:
+  wiki-manager:
+    transport: stdio
+    command: node
+    args: [".agents/run-wiki-manager.mcp.js"]
+    reconnect:
+      enabled: true
+      initialDelayMs: 5000
+      maxAttempts: 5

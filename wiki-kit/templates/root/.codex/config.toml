@@ -1,0 +1,20 @@
+[mcp_servers.wiki-manager]
+command = "node"
+args = [".agents/run-wiki-manager.mcp.js"]
+startup_timeout_sec = 75.0
+tool_timeout_sec = 120.0
+
+[mcp_servers.wiki-manager.tools.wiki_search]
+approval_mode = "approve"
+
+[mcp_servers.wiki-manager.tools.wiki_read]
+approval_mode = "approve"
+
+[mcp_servers.wiki-manager.tools.wiki_list]
+approval_mode = "approve"
+
+[mcp_servers.wiki-manager.tools.wiki_schema_report]
+approval_mode = "approve"
+
+[mcp_servers.wiki-manager.tools.wiki_write]
+approval_mode = "approve"

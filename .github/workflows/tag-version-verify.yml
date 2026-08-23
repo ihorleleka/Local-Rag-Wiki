@@ -1,0 +1,61 @@
+name: Tag Version Verify
+
+on:
+  push:
+    tags:
+      - "*"
+  workflow_dispatch:
+
+jobs:
+  resolve-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve semver from tag
+        id: version
+        shell: bash
+        run: |
+          RAW="${GITHUB_REF_NAME}"
+          VERSION="${RAW#v}"
+          if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Release tag must be X.Y.Z or vX.Y.Z; received: ${RAW}" >&2
+            exit 1
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+
+  verify-wiki-kit:
+    runs-on: ubuntu-latest
+    needs: resolve-version
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Apply tag version to wiki-kit package
+        run: npm --prefix wiki-kit pkg set version="${{ needs.resolve-version.outputs.version }}"
+      - name: Verify wiki-kit version and run checks
+        run: |
+          test "$(node -p "require('./wiki-kit/package.json').version")" = "${{ needs.resolve-version.outputs.version }}"
+          npm --prefix wiki-kit run verify
+
+  verify-kb-service:
+    runs-on: ubuntu-latest
+    needs: resolve-version
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install package metadata tooling
+        run: python -m pip install --upgrade pip setuptools setuptools-scm wheel
+      - name: Install kb-service without dependencies
+        run: python -m pip install --no-deps ./kb-service
+      - name: Verify kb-service version from tag
+        shell: bash
+        run: |
+          PKG_VERSION="$(python -c 'import importlib.metadata; print(importlib.metadata.version("kb-service"))')"
+          test "${PKG_VERSION}" = "${{ needs.resolve-version.outputs.version }}"
+

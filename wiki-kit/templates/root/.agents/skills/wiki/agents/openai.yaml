@@ -1,0 +1,4 @@
+interface:
+  display_name: "Wiki"
+  short_description: "Packet-first wiki retrieval and maintenance"
+  default_prompt: "Use $wiki to route repository knowledge work: retrieve context when it can change the next decision; maintain verified knowledge at its narrowest authoritative scope; preserve exact contract terms but separate incidental examples from invariants; and audit schema, trust, or retrieval quality. Skip ritual retrieval and unnecessary writes."

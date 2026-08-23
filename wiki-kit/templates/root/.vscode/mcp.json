@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "wiki-manager": {
+      "type": "stdio",
+      "command": "node",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "${workspaceFolder}/.agents/run-wiki-manager.mcp.js"
+      ]
+    }
+  }
+}

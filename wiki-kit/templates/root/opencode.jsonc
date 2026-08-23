@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "wiki-manager": {
+      "type": "local",
+      "enabled": true,
+      "timeout": 75000,
+      "command": ["node", ".agents/run-wiki-manager.mcp.js"]
+    }
+  },
+  "instructions": [
+    "AGENTS.md"
+  ]
+}

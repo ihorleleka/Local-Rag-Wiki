@@ -6,8 +6,8 @@ on:
       - "*"
 
 env:
-  IMAGE_NAME: ihorleleka/project-rag-wiki
-  CANDIDATE_IMAGE: project-rag-wiki:release-candidate
+  IMAGE_NAME: ihorleleka/local-rag-wiki
+  CANDIDATE_IMAGE: local-rag-wiki:release-candidate
 
 jobs:
   test-and-release:
@@ -16,7 +16,7 @@ jobs:
       contents: read
 
     steps:
-      - name: Check out knowledge service
+      - name: Check out repository
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -25,9 +25,10 @@ jobs:
         id: version
         shell: bash
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          RAW="${GITHUB_REF_NAME}"
+          VERSION="${RAW#v}"
           if [[ ! "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must be X.Y.Z; received: ${VERSION}" >&2
+            echo "Release tag must be X.Y.Z or vX.Y.Z; received: ${RAW}" >&2
             exit 1
           fi
           echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
@@ -37,7 +38,7 @@ jobs:
         shell: bash
         run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
-      - name: Build the only release candidate
+      - name: Build the release candidate
         run: |
           docker build \
             --build-arg VERSION="${{ steps.version.outputs.version }}" \
@@ -46,21 +47,21 @@ jobs:
             --build-arg INDEX_SCHEMA_VERSION=6 \
             --build-arg MCP_TOOL_CONTRACT_VERSION=4 \
             --tag "${CANDIDATE_IMAGE}" \
-            .
+            ./kb-service
 
       - name: Verify candidate metadata
         run: |
           test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "${{ steps.version.outputs.version }}"
           test "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'import importlib.metadata; print(importlib.metadata.version("kb-service"))')" = "${{ steps.version.outputs.version }}"
 
-      - name: Run real-model retrieval gate
+      - name: Run retrieval gate
         run: |
           mkdir -p artifacts
-          docker volume create project-rag-wiki-ci-hf
+          docker volume create local-rag-wiki-ci-hf
           docker run --rm \
-            -v "${{ github.workspace }}/tests:/evaluation:ro" \
+            -v "${{ github.workspace }}/kb-service/tests:/evaluation:ro" \
             -v "${{ github.workspace }}/artifacts:/artifacts" \
-            -v "project-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
+            -v "local-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
             "${CANDIDATE_IMAGE}" \
             python -m kb_service.evaluation \
               --wiki-root /evaluation/fixtures/retrieval-wiki \
@@ -68,46 +69,46 @@ jobs:
               --output /artifacts/wiki-retrieval-report.json \
               --top-k 3
 
-      - name: Run fast unit suite in candidate image
+      - name: Run unit suite in candidate image
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}/tests:/tests:ro" \
+            -v "${{ github.workspace }}/kb-service/tests:/tests:ro" \
             "${CANDIDATE_IMAGE}" \
             python -m unittest discover -s /tests -p "test_*.py" -v
 
-      - name: Run real Chroma integration suite
+      - name: Run Chroma integration suite
         run: |
           docker run --rm \
-            -v "${{ github.workspace }}/tests:/integration:ro" \
+            -v "${{ github.workspace }}/kb-service/tests:/integration:ro" \
             "${CANDIDATE_IMAGE}" \
             python /integration/integration_real.py
 
       - name: Start release-candidate container
         run: |
-          docker volume create project-rag-wiki-ci-kb
-          docker run -d --name project-rag-wiki-ci-smoke \
+          docker volume create local-rag-wiki-ci-kb
+          docker run -d --name local-rag-wiki-ci-smoke \
             -p 127.0.0.1:18111:1111 \
-            -v "${{ github.workspace }}/tests/fixtures/retrieval-wiki:/workspace/wiki:ro" \
+            -v "${{ github.workspace }}/kb-service/tests/fixtures/retrieval-wiki:/workspace/wiki:ro" \
             -v "${{ github.workspace }}:/repository:ro" \
-            -v "project-rag-wiki-ci-kb:/workspace/.kb" \
-            -v "project-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
+            -v "local-rag-wiki-ci-kb:/workspace/.kb" \
+            -v "local-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
             "${CANDIDATE_IMAGE}"
           for attempt in $(seq 1 120); do
             if curl --fail --silent http://127.0.0.1:18111/health >/dev/null; then exit 0; fi
             sleep 1
           done
-          docker logs project-rag-wiki-ci-smoke
+          docker logs local-rag-wiki-ci-smoke
           exit 1
 
-      - name: Probe release-candidate HTTP and MCP surface
-        run: python tests/container_smoke.py 18111
+      - name: Probe HTTP and MCP surface
+        run: python kb-service/tests/container_smoke.py 18111
 
       - name: Clean smoke resources
         if: always()
         run: |
-          docker rm -f project-rag-wiki-ci-smoke 2>/dev/null || true
-          docker volume rm project-rag-wiki-ci-kb 2>/dev/null || true
-          docker volume rm project-rag-wiki-ci-hf 2>/dev/null || true
+          docker rm -f local-rag-wiki-ci-smoke 2>/dev/null || true
+          docker volume rm local-rag-wiki-ci-kb 2>/dev/null || true
+          docker volume rm local-rag-wiki-ci-hf 2>/dev/null || true
 
       - name: Upload retrieval report
         if: always()
@@ -122,7 +123,7 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Push the tested candidate without rebuilding
+      - name: Push tested candidate without rebuilding
         run: |
           docker tag "${CANDIDATE_IMAGE}" "${IMAGE_NAME}:${{ steps.version.outputs.version }}"
           docker tag "${CANDIDATE_IMAGE}" "${IMAGE_NAME}:latest"
