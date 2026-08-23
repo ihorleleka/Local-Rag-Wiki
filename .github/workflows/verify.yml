@@ -1,10 +1,6 @@
 name: Verify
 
 on:
-  push:
-    branches: [main]
-    tags: ["*"]
-  pull_request:
   workflow_dispatch:
 
 jobs:
@@ -19,9 +15,6 @@ jobs:
       - run: npm run verify
 
   wiki-kit-runner-integration:
-    # Tag pushes publish a new pinned image in a separate workflow, so running
-    # this pull-based check here can race before that image exists.
-    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

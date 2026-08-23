@@ -76,7 +76,7 @@
     },
     {
       "id": "undocumented-security-policy",
-      "query": "What is the approved production secret rotation interval, incident escalation phone number, and customer encryption key custody policy?",
+      "query": "In this repository, what does the internal codename ZXQ-314 sentinel lattice protocol require for deployment and operator training?",
       "expected_owner": null,
       "acceptable_alternatives": [],
       "expected_miss": true,

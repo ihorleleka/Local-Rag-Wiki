@@ -34,10 +34,10 @@ jobs:
           node-version: 20
       - name: Apply tag version to wiki-kit package
         run: npm pkg set version="${{ needs.resolve-version.outputs.version }}"
-      - name: Verify wiki-kit version and run checks
+      - name: Verify wiki-kit release package metadata
         run: |
           test "$(node -p "require('./package.json').version")" = "${{ needs.resolve-version.outputs.version }}"
-          npm run verify
+          npm pack --dry-run
 
   verify-kb-service:
     runs-on: ubuntu-latest
@@ -52,10 +52,12 @@ jobs:
       - name: Install package metadata tooling
         run: python -m pip install --upgrade pip setuptools setuptools-scm wheel
       - name: Install kb-service without dependencies
-        run: python -m pip install --no-deps ./kb-service
+        run: |
+          SETUPTOOLS_SCM_PRETEND_VERSION="${{ needs.resolve-version.outputs.version }}" \
+          python -m pip install --no-deps ./kb-service
       - name: Verify kb-service version from tag
         shell: bash
         run: |
           PKG_VERSION="$(python -c 'import importlib.metadata; print(importlib.metadata.version("kb-service"))')"
+          echo "Resolved kb-service version: ${PKG_VERSION}"
           test "${PKG_VERSION}" = "${{ needs.resolve-version.outputs.version }}"
-

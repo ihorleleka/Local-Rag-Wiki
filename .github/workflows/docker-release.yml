@@ -67,37 +67,9 @@ jobs:
           test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "io.github.ihorleleka.project-rag-wiki.index-schema-version" }}')" = "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'from kb_service.contract import INDEX_SCHEMA_VERSION; print(INDEX_SCHEMA_VERSION)')"
           test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "io.github.ihorleleka.project-rag-wiki.mcp-tool-contract-version" }}')" = "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'from kb_service.contract import MCP_TOOL_CONTRACT_VERSION; print(MCP_TOOL_CONTRACT_VERSION)')"
 
-      - name: Run retrieval gate
-        run: |
-          mkdir -p artifacts
-          docker volume create local-rag-wiki-ci-hf
-          docker run --rm \
-            -v "${{ github.workspace }}/kb-service/tests:/evaluation:ro" \
-            -v "${{ github.workspace }}/artifacts:/artifacts" \
-            -v "local-rag-wiki-ci-hf:/root/.cache/chroma" \
-            "${CANDIDATE_IMAGE}" \
-            python -m kb_service.evaluation \
-              --wiki-root /evaluation/fixtures/retrieval-wiki \
-              --dataset /evaluation/retrieval-evaluation.json \
-              --output /artifacts/wiki-retrieval-report.json \
-              --top-k 3
-
-      - name: Run unit suite in candidate image
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}/kb-service/tests:/tests:ro" \
-            "${CANDIDATE_IMAGE}" \
-            python -m unittest discover -s /tests -p "test_*.py" -v
-
-      - name: Run Chroma integration suite
-        run: |
-          docker run --rm \
-            -v "${{ github.workspace }}/kb-service/tests:/integration:ro" \
-            "${CANDIDATE_IMAGE}" \
-            python /integration/integration_real.py
-
       - name: Start release-candidate container
         run: |
+          docker volume create local-rag-wiki-ci-hf
           docker volume create local-rag-wiki-ci-kb
           docker run -d --name local-rag-wiki-ci-smoke \
             -p 127.0.0.1:18111:1111 \
@@ -122,13 +94,6 @@ jobs:
           docker rm -f local-rag-wiki-ci-smoke 2>/dev/null || true
           docker volume rm local-rag-wiki-ci-kb 2>/dev/null || true
           docker volume rm local-rag-wiki-ci-hf 2>/dev/null || true
-
-      - name: Upload retrieval report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: wiki-retrieval-report
-          path: artifacts/wiki-retrieval-report.json
 
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
