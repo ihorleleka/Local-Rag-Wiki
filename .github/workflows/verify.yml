@@ -19,7 +19,9 @@ jobs:
       - run: npm run verify
 
   wiki-kit-runner-integration:
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    # Tag pushes publish a new pinned image in a separate workflow, so running
+    # this pull-based check here can race before that image exists.
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -34,4 +36,3 @@ jobs:
           docker pull "$image"
       - name: Exercise Docker and MCP runner
         run: npm run verify:runner
-

@@ -332,6 +332,22 @@ function assertCompatibilityClassification() {
   );
 }
 
+function assertReleaseWorkflowImageRepository() {
+  const separator = DEFAULT_IMAGE.lastIndexOf(":");
+  assert(separator > 0, `DEFAULT_IMAGE is missing a tag: ${DEFAULT_IMAGE}`);
+  const expectedRepository = DEFAULT_IMAGE.slice(0, separator);
+  const dockerReleaseWorkflow = fs.readFileSync(
+    path.join(ROOT, ".github", "workflows", "docker-release.yml"),
+    "utf8"
+  );
+  const imageNameMatch = dockerReleaseWorkflow.match(/^\s*IMAGE_NAME:\s*(\S+)\s*$/m);
+  assert(imageNameMatch, "docker-release workflow is missing IMAGE_NAME");
+  assert(
+    imageNameMatch[1] === expectedRepository,
+    `docker-release IMAGE_NAME must match pinned repository (${expectedRepository}), found ${imageNameMatch[1]}`
+  );
+}
+
 function assertMergedInstall(targetRoot, agentsDir) {
   const agentsPolicy = fs.readFileSync(path.join(targetRoot, "AGENTS.md"), "utf8");
   const wikiSkillPath = path.join(targetRoot, agentsDir, "skills", "wiki", "SKILL.md");
@@ -417,6 +433,7 @@ function assertLegacyAgentsPolicyMigrated(targetRoot) {
 
 function main() {
   assertCompatibilityClassification();
+  assertReleaseWorkflowImageRepository();
   assertRepositoryUniqueResourceNames();
   prepareScratch(DEFAULT_SMOKE_ROOT);
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", DEFAULT_SMOKE_ROOT, "--force"]);

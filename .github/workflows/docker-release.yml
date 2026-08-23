@@ -6,7 +6,7 @@ on:
       - "*"
 
 env:
-  IMAGE_NAME: ihorleleka/local-rag-wiki
+  IMAGE_NAME: ihorleleka/project-rag-wiki
   CANDIDATE_IMAGE: local-rag-wiki:release-candidate
 
 jobs:
