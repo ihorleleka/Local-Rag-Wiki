@@ -38,14 +38,24 @@ jobs:
         shell: bash
         run: echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${GITHUB_OUTPUT}"
 
+      - name: Resolve contract versions
+        id: contract
+        shell: bash
+        run: |
+          CONTRACT="kb-service/src/kb_service/contract.py"
+          SCHEMA="$(python -c "import re,pathlib;print(re.search(r'INDEX_SCHEMA_VERSION\s*=\s*(\d+)', pathlib.Path('${CONTRACT}').read_text()).group(1))")"
+          TOOL="$(python -c "import re,pathlib;print(re.search(r'MCP_TOOL_CONTRACT_VERSION\s*=\s*(\d+)', pathlib.Path('${CONTRACT}').read_text()).group(1))")"
+          echo "index_schema_version=${SCHEMA}" >> "${GITHUB_OUTPUT}"
+          echo "mcp_tool_contract_version=${TOOL}" >> "${GITHUB_OUTPUT}"
+
       - name: Build the release candidate
         run: |
           docker build \
             --build-arg VERSION="${{ steps.version.outputs.version }}" \
             --build-arg VCS_REF="${GITHUB_SHA}" \
             --build-arg BUILD_DATE="${{ steps.metadata.outputs.build_date }}" \
-            --build-arg INDEX_SCHEMA_VERSION=6 \
-            --build-arg MCP_TOOL_CONTRACT_VERSION=4 \
+            --build-arg INDEX_SCHEMA_VERSION="${{ steps.contract.outputs.index_schema_version }}" \
+            --build-arg MCP_TOOL_CONTRACT_VERSION="${{ steps.contract.outputs.mcp_tool_contract_version }}" \
             --tag "${CANDIDATE_IMAGE}" \
             ./kb-service
 
@@ -53,6 +63,9 @@ jobs:
         run: |
           test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "org.opencontainers.image.version" }}')" = "${{ steps.version.outputs.version }}"
           test "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'import importlib.metadata; print(importlib.metadata.version("kb-service"))')" = "${{ steps.version.outputs.version }}"
+          # Image labels must match the contract constants baked into the image.
+          test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "io.github.ihorleleka.project-rag-wiki.index-schema-version" }}')" = "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'from kb_service.contract import INDEX_SCHEMA_VERSION; print(INDEX_SCHEMA_VERSION)')"
+          test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "io.github.ihorleleka.project-rag-wiki.mcp-tool-contract-version" }}')" = "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'from kb_service.contract import MCP_TOOL_CONTRACT_VERSION; print(MCP_TOOL_CONTRACT_VERSION)')"
 
       - name: Run retrieval gate
         run: |
@@ -61,7 +74,7 @@ jobs:
           docker run --rm \
             -v "${{ github.workspace }}/kb-service/tests:/evaluation:ro" \
             -v "${{ github.workspace }}/artifacts:/artifacts" \
-            -v "local-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
+            -v "local-rag-wiki-ci-hf:/root/.cache/chroma" \
             "${CANDIDATE_IMAGE}" \
             python -m kb_service.evaluation \
               --wiki-root /evaluation/fixtures/retrieval-wiki \
@@ -91,7 +104,7 @@ jobs:
             -v "${{ github.workspace }}/kb-service/tests/fixtures/retrieval-wiki:/workspace/wiki:ro" \
             -v "${{ github.workspace }}:/repository:ro" \
             -v "local-rag-wiki-ci-kb:/workspace/.kb" \
-            -v "local-rag-wiki-ci-hf:/root/.cache/huggingface/hub" \
+            -v "local-rag-wiki-ci-hf:/root/.cache/chroma" \
             "${CANDIDATE_IMAGE}"
           for attempt in $(seq 1 120); do
             if curl --fail --silent http://127.0.0.1:18111/health >/dev/null; then exit 0; fi

@@ -10,7 +10,7 @@ ENV PATH="/opt/venv/bin:$PATH"
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip \
     && python -c "import tomllib, pathlib; p=pathlib.Path('/app/pyproject.toml'); data=tomllib.loads(p.read_text()); project=data.get('project', {}); dynamic=set(project.get('dynamic', [])); assert 'dependencies' not in dynamic, 'dynamic dependencies are not supported by this Docker build'; deps=list(project.get('dependencies', [])); optional=project.get('optional-dependencies', {}); [deps.extend(group) for group in optional.values()]; unique=list(dict.fromkeys(deps)); pathlib.Path('/tmp/requirements.txt').write_text('\n'.join(unique))" \
-    && pip install --prefer-binary --extra-index-url https://download.pytorch.org/whl/cpu -r /tmp/requirements.txt
+    && pip install --prefer-binary -r /tmp/requirements.txt
 
 FROM python:3.14-slim
 
@@ -24,8 +24,11 @@ RUN apt-get update \
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG VERSION=0.0.0
-ARG INDEX_SCHEMA_VERSION=6
-ARG MCP_TOOL_CONTRACT_VERSION=4
+# Source of truth is src/kb_service/contract.py; CI extracts these and passes
+# them as build args, then verifies the labels match the values inside the image.
+# The defaults here are a local-build fallback only.
+ARG INDEX_SCHEMA_VERSION=7
+ARG MCP_TOOL_CONTRACT_VERSION=5
 LABEL org.opencontainers.image.title="kb-service" \
       org.opencontainers.image.description="Repository-scoped MCP knowledge service for Markdown wiki content." \
       org.opencontainers.image.version="${VERSION}" \

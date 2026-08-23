@@ -1,9 +1,0 @@
-{
-    "chat.mcp.autostart": "newAndOutdated",
-    "chat.mcp.discovery.enabled": {
-        "claude-desktop": true,
-        "windsurf": true,
-        "cursor-global": true,
-        "cursor-workspace": true
-    }
-}

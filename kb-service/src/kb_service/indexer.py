@@ -4,6 +4,7 @@ import json
 import os
 import re
 import threading
+import logging
 import fnmatch
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -13,9 +14,12 @@ from typing import Any, Callable
 import chromadb
 import frontmatter
 
-from .embeddings import LocalSentenceTransformerProvider
+from .embeddings import OnnxMiniLmProvider
 from .atomic_io import atomic_write_text
+from .contract import INDEX_SCHEMA_VERSION
 from .evidence import EvidenceInspector, EvidenceReport, declared_evidence_report
+from .lexical import BM25Index, is_identifier_like
+from .reranker import load_reranker
 from .settings import Settings
 from .text_utils import (
     extract_links,
@@ -38,6 +42,10 @@ SEMANTIC_SECTIONS = {
     "steps": "steps",
     "terms": "terms",
     "aliases": "aliases",
+    "context": "context",
+    "findings": "findings",
+    "eliminated approaches": "eliminated_approaches",
+    "scope and completeness": "scope_and_completeness",
     "evidence": "evidence",
     "retrieval hints": "retrieval_hints",
     "capability contract": "capability_contract",
@@ -77,12 +85,16 @@ SECTION_PRIORITY = {
     "raw": 4,
 }
 
-NOTE_KINDS = {"rule", "decision", "reference", "runbook", "glossary"}
+NOTE_KINDS = {"rule", "decision", "reference", "runbook", "glossary", "investigation"}
 NOTE_STATUSES = {"active", "superseded", "deprecated", "pending"}
 DEFAULT_NOTE_MAX_LINES = 200
 PACKET_EMBEDDING_TOKEN_BUDGET = 240
 PACKET_SCORE_BOOST = 0.04
 UNVERIFIED_PACKET_PENALTY = 0.03
+# Evidence whose anchors disappeared or changed since the note was last verified
+# is auto-demoted in ranking so drift self-corrects without a manual audit pass.
+EVIDENCE_CHANGED_PENALTY = 0.05
+CHANGED_EVIDENCE_STATES = {"missing", "changed_since_verification"}
 MAX_RESULTS_PER_SOURCE = 2
 INACTIVE_NOTE_STATUSES = {"superseded", "deprecated"}
 
@@ -122,11 +134,20 @@ REQUIRED_SECTIONS = {
         "aliases": "Aliases",
         "retrieval_hints": "Retrieval hints",
     },
+    "investigation": {
+        "use_this_when": "Use this when",
+        "context": "Context",
+        "findings": "Findings",
+        "eliminated_approaches": "Eliminated approaches",
+        "scope_and_completeness": "Scope and completeness",
+        "evidence": "Evidence",
+        "retrieval_hints": "Retrieval hints",
+    },
 }
 
-INDEX_SCHEMA_VERSION = 6
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
 
+LOGGER = logging.getLogger(__name__)
 
 @dataclass
 class SearchResult:
@@ -148,18 +169,40 @@ class SearchCandidate:
     record_type: str
     packet: dict[str, Any] | None
     metadata: dict[str, Any]
+    lexical_score: float = 0.0
+    dense_rank: int | None = None
+    lexical_rank: int | None = None
+    fused_score: float = 0.0
+
+    @property
+    def trust_delta(self) -> float:
+        """Score adjustment that prefers verified owner packets and demotes drift.
+
+        Kept on the 0..1 relevance scale so it applies identically to the dense
+        cosine score and to the normalized hybrid fusion score.
+        """
+        if self.record_type != "packet":
+            return 0.0
+        delta = PACKET_SCORE_BOOST
+        packet = self.packet or {}
+        if packet.get("verification_required", packet.get("needs_verification", False)):
+            delta -= UNVERIFIED_PACKET_PENALTY
+        if str(packet.get("evidence_state", "")) in CHANGED_EVIDENCE_STATES:
+            delta -= EVIDENCE_CHANGED_PENALTY
+        return delta
+
+    @property
+    def gate_score(self) -> float:
+        """Relevance used for the ``min_relevance`` admission gate."""
+        return max(self.semantic_score, self.lexical_score)
 
     @property
     def ranking_score(self) -> float:
-        score = self.semantic_score
-        if self.record_type == "packet":
-            score += PACKET_SCORE_BOOST
-            if self.packet and self.packet.get(
-                "verification_required",
-                self.packet.get("needs_verification", False),
-            ):
-                score -= UNVERIFIED_PACKET_PENALTY
-        return max(0.0, min(1.0, score))
+        return max(0.0, min(1.0, self.gate_score + self.trust_delta))
+
+    @property
+    def hybrid_score(self) -> float:
+        return max(0.0, min(1.0, self.fused_score + self.trust_delta))
 
     @property
     def note_status(self) -> str:
@@ -233,6 +276,8 @@ def _normalise_kind(value: Any, sections: dict[str, str]) -> tuple[str, bool]:
         return raw, True
     if "decision" in sections:
         return "decision", False
+    if "findings" in sections or "eliminated_approaches" in sections:
+        return "investigation", False
     if "rule" in sections or "do" in sections or "do_not" in sections:
         return "rule", False
     if "steps" in sections:
@@ -297,6 +342,29 @@ def _document_title(markdown: str) -> str:
     return match.group(1).strip() if match else ""
 
 
+def _normalise_path_prefix(path_prefix: str | None) -> str:
+    if not path_prefix:
+        return ""
+    normalized = str(path_prefix).replace("\\", "/").strip().strip("/")
+    if normalized.endswith(".md"):
+        return normalized
+    return normalized
+
+
+def _path_within_scope(source_file: str, scope: str) -> bool:
+    if not scope:
+        return True
+    normalized = str(source_file).replace("\\", "/").strip("/")
+    if scope.endswith(".md"):
+        return normalized == scope
+    return normalized == scope or normalized.startswith(f"{scope}/")
+
+
+def _slugify_note_title(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", str(title or "").strip().lower()).strip("-")
+    return slug or "capture"
+
+
 def _missing_wiki_links(links: list[str], indexed_paths: set[str]) -> list[str]:
     indexed_stems = {str(Path(path).with_suffix("")).replace("\\", "/") for path in indexed_paths}
     missing: list[str] = []
@@ -320,8 +388,11 @@ class KnowledgeIndex:
         self.manifest_path = self.settings.kb_root / "manifest.json"
         self.client = chromadb.PersistentClient(path=str(self.settings.kb_root / "chroma"))
         self.collection = self.client.get_or_create_collection("wiki_chunks", metadata={"hnsw:space": "cosine"})
-        self.provider = LocalSentenceTransformerProvider(settings.embedding_model)
+        self.provider = OnnxMiniLmProvider(settings.embedding_model)
         self._write_lock = threading.RLock()
+        self._lexical_lock = threading.RLock()
+        self._lexical_cache: dict[str, Any] | None = None
+        self.reranker = load_reranker(settings)
 
     def _read_manifest(self) -> dict[str, Any]:
         if not self.manifest_path.exists():
@@ -370,6 +441,8 @@ class KnowledgeIndex:
         architecture_boundaries: list[str],
         quality_attributes: list[str],
         acceptance_verification: list[str],
+        findings: list[str] | None = None,
+        context: str = "",
     ) -> str:
         token_budget = min(PACKET_EMBEDDING_TOKEN_BUDGET, self.provider.max_input_tokens)
         lines: list[str] = []
@@ -419,6 +492,8 @@ class KnowledgeIndex:
         append_line("Anti-patterns", "; ".join(anti_patterns), 40)
         append_line("Key facts", "; ".join(key_facts), 48)
         append_line("Steps", "; ".join(steps), 48)
+        append_line("Findings", "; ".join(findings or []), 48)
+        append_line("Context", context, 40)
 
         document = "\n".join(lines)
         if self.provider.token_count(document) > token_budget:
@@ -463,8 +538,12 @@ class KnowledgeIndex:
         acceptance_verification = _list_items(sections.get("acceptance_verification", ""))
         reconstruction_guidance = _list_items(sections.get("reconstruction_guidance", ""))
         open_questions = _list_items(sections.get("open_questions", ""))
+        context = sections.get("context", "").strip()
+        findings = _list_items(sections.get("findings", ""))
+        eliminated_approaches = _list_items(sections.get("eliminated_approaches", ""))
+        scope_and_completeness = sections.get("scope_and_completeness", "").strip()
 
-        if not any([note_rule, decision, summary, do_items, do_not_items, key_facts, steps, terms, aliases, evidence_items]):
+        if not any([note_rule, decision, summary, do_items, do_not_items, key_facts, steps, terms, aliases, evidence_items, findings, context]):
             return None
 
         last_verified = _normalise_date(metadata.get("last_verified"))
@@ -526,15 +605,32 @@ class KnowledgeIndex:
             or evidence_state != "present"
         )
 
+        # Resolved anchor provenance lets agents cite the exact repository file,
+        # symbol/locator, and its current trust state instead of re-deriving it.
+        evidence_provenance: list[dict[str, str]] = []
+        for anchor in evidence_report.anchors[: evidence_report.max_anchors]:
+            entry: dict[str, str] = {"target": anchor.target}
+            if anchor.locator:
+                entry["locator"] = anchor.locator
+            if anchor.kind and anchor.kind != "path":
+                entry["kind"] = anchor.kind
+            entry["state"] = (
+                "missing"
+                if not anchor.exists
+                else ("modified" if anchor.working_tree_state != "clean" else "present")
+            )
+            evidence_provenance.append(entry)
+
         rule = _first_content(
             sections.get("capability_contract", ""),
             note_rule,
             decision,
             summary,
+            context,
             use_this_when,
             rationale,
             consequences,
-            items=do_items or key_facts or steps or terms,
+            items=do_items or key_facts or steps or findings or terms,
         )
         applies_to = _string_list(metadata.get("applies_to"))
 
@@ -569,6 +665,10 @@ class KnowledgeIndex:
             "acceptance_verification": acceptance_verification,
             "reconstruction_guidance": reconstruction_guidance,
             "has_open_questions": bool(open_questions),
+            "context": context,
+            "findings": findings,
+            "eliminated_approaches": eliminated_approaches,
+            "scope_and_completeness": scope_and_completeness,
         }
 
         packet = {
@@ -595,6 +695,7 @@ class KnowledgeIndex:
             "evidence": evidence_items,
             "evidence_summary": evidence_report.summary(),
             "evidence_issues": evidence_issues,
+            "evidence_provenance": evidence_provenance,
             "gaps": gaps,
             "status": note_status,
             "capability_contract": capability_contract,
@@ -606,6 +707,10 @@ class KnowledgeIndex:
             "acceptance_verification": acceptance_verification,
             "reconstruction_guidance": reconstruction_guidance,
             "has_open_questions": bool(open_questions),
+            "context": context,
+            "findings": findings,
+            "eliminated_approaches": eliminated_approaches,
+            "scope_and_completeness": scope_and_completeness,
         }
 
         index_text = self._build_packet_embedding_document(
@@ -625,6 +730,8 @@ class KnowledgeIndex:
             architecture_boundaries=architecture_boundaries,
             quality_attributes=quality_attributes,
             acceptance_verification=acceptance_verification,
+            findings=findings,
+            context=context,
         )
 
         return ContextPacket(
@@ -1082,6 +1189,10 @@ class KnowledgeIndex:
 
         manifest["files"] = current
         self._write_manifest(manifest)
+        # The lexical BM25 index is derived from the collection; drop the cache so
+        # the next search rebuilds it in lockstep with the vector store.
+        with self._lexical_lock:
+            self._lexical_cache = None
         return {
             "changed": changed,
             "removed": removed,
@@ -1091,28 +1202,10 @@ class KnowledgeIndex:
         }
 
     @staticmethod
-    def _select_ranked_candidates(
-        candidates: list[SearchCandidate],
+    def _apply_source_diversity(
+        eligible: list[SearchCandidate],
         k: int,
-        include_inactive: bool = False,
-        min_relevance: float = 0.0,
     ) -> list[SearchCandidate]:
-        eligible = [
-            candidate
-            for candidate in candidates
-            if (include_inactive or candidate.note_status not in INACTIVE_NOTE_STATUSES)
-            and candidate.ranking_score >= min_relevance
-        ]
-        eligible.sort(
-            key=lambda candidate: (
-                -candidate.ranking_score,
-                -candidate.semantic_score,
-                candidate.source_file,
-                candidate.record_type,
-                candidate.chunk_idx,
-            )
-        )
-
         selected: list[SearchCandidate] = []
         selected_ids: set[int] = set()
         source_counts: dict[str, int] = {}
@@ -1139,11 +1232,219 @@ class KnowledgeIndex:
                 break
         return selected
 
+    @classmethod
+    def _order_ranked_candidates(
+        cls,
+        candidates: list[SearchCandidate],
+        include_inactive: bool = False,
+        min_relevance: float = 0.0,
+    ) -> list[SearchCandidate]:
+        eligible = [
+            candidate
+            for candidate in candidates
+            if (include_inactive or candidate.note_status not in INACTIVE_NOTE_STATUSES)
+            and candidate.ranking_score >= min_relevance
+        ]
+        eligible.sort(
+            key=lambda candidate: (
+                -candidate.ranking_score,
+                -candidate.semantic_score,
+                candidate.source_file,
+                candidate.record_type,
+                candidate.chunk_idx,
+            )
+        )
+        return eligible
+
+    @classmethod
+    def _select_ranked_candidates(
+        cls,
+        candidates: list[SearchCandidate],
+        k: int,
+        include_inactive: bool = False,
+        min_relevance: float = 0.0,
+    ) -> list[SearchCandidate]:
+        return cls._apply_source_diversity(
+            cls._order_ranked_candidates(candidates, include_inactive, min_relevance),
+            k,
+        )
+
+    @classmethod
+    def _order_hybrid_candidates(
+        cls,
+        candidates: list[SearchCandidate],
+        include_inactive: bool = False,
+        min_relevance: float = 0.0,
+    ) -> list[SearchCandidate]:
+        """Order the fused dense+lexical pool by reciprocal-rank fusion.
+
+        Admission still honours ``min_relevance`` on the best per-signal score, so
+        a strong keyword match survives even when its dense cosine is weak, while
+        low-signal dense noise is dropped exactly as in the dense-only path.
+        """
+        eligible = [
+            candidate
+            for candidate in candidates
+            if (include_inactive or candidate.note_status not in INACTIVE_NOTE_STATUSES)
+            and candidate.gate_score >= min_relevance
+        ]
+        eligible.sort(
+            key=lambda candidate: (
+                -candidate.hybrid_score,
+                -candidate.fused_score,
+                -candidate.gate_score,
+                candidate.source_file,
+                candidate.record_type,
+                candidate.chunk_idx,
+            )
+        )
+        return eligible
+
+    @classmethod
+    def _select_hybrid_candidates(
+        cls,
+        candidates: list[SearchCandidate],
+        k: int,
+        include_inactive: bool = False,
+        min_relevance: float = 0.0,
+    ) -> list[SearchCandidate]:
+        return cls._apply_source_diversity(
+            cls._order_hybrid_candidates(candidates, include_inactive, min_relevance),
+            k,
+        )
+
+    def _rerank_pool(
+        self,
+        query: str,
+        ordered: list[SearchCandidate],
+    ) -> list[SearchCandidate]:
+        """Reorder the strongest fused candidates with the cross-encoder.
+
+        Only the top ``reranker_top_n`` are cross-encoded (the expensive step);
+        the tail keeps its fusion order. Any failure degrades to the input order.
+        """
+        reranker = self.reranker
+        if reranker is None or len(ordered) < 2:
+            return ordered
+        top_n = max(1, int(getattr(self.settings, "reranker_top_n", 20)))
+        head = ordered[:top_n]
+        tail = ordered[top_n:]
+        try:
+            scores = reranker.score(query, [self._rerank_text(c) for c in head])
+        except Exception:
+            LOGGER.warning("Cross-encoder rerank failed; using fusion order", exc_info=True)
+            return ordered
+        if not scores or len(scores) != len(head):
+            return ordered
+        reordered = [
+            candidate
+            for _, candidate in sorted(
+                zip(scores, head),
+                key=lambda pair: pair[0],
+                reverse=True,
+            )
+        ]
+        return reordered + tail
+
+    def _ensure_lexical_index(self) -> dict[str, Any]:
+        with self._lexical_lock:
+            if self._lexical_cache is not None:
+                return self._lexical_cache
+            try:
+                fetched = self.collection.get(include=["documents", "metadatas"])
+            except Exception:
+                fetched = {}
+            ids = fetched.get("ids", []) or []
+            docs = fetched.get("documents", []) or []
+            metas = fetched.get("metadatas", []) or []
+            documents: list[tuple[str, str]] = []
+            meta_map: dict[str, dict[str, Any]] = {}
+            doc_map: dict[str, str] = {}
+            for position, doc_id in enumerate(ids):
+                text = docs[position] if position < len(docs) else ""
+                meta = metas[position] if position < len(metas) else {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                text = text or ""
+                documents.append((doc_id, text))
+                meta_map[doc_id] = meta
+                doc_map[doc_id] = text
+            cache = {
+                "bm25": BM25Index.build(documents),
+                "meta": meta_map,
+                "doc": doc_map,
+            }
+            self._lexical_cache = cache
+            return cache
+
+    def _lexical_search(
+        self,
+        query: str,
+        limit: int,
+        scope: str,
+    ) -> list[tuple[str, float, list[str], dict[str, Any], str]]:
+        cache = self._ensure_lexical_index()
+        bm25: BM25Index = cache["bm25"]
+        if not len(bm25):
+            return []
+        hits = bm25.search(query, limit)
+        results: list[tuple[str, float, list[str], dict[str, Any], str]] = []
+        for doc_id, norm, matched in hits:
+            meta = cache["meta"].get(doc_id, {})
+            source_file = str(meta.get("source_file", ""))
+            if scope and not _path_within_scope(source_file, scope):
+                continue
+            results.append((doc_id, norm, matched, meta, cache["doc"].get(doc_id, "")))
+        return results
+
+    def _candidate_from_metadata(
+        self,
+        doc_id: str,
+        meta: dict[str, Any],
+        doc_text: str,
+    ) -> SearchCandidate:
+        record_type = str(meta.get("record_type", "chunk"))
+        try:
+            chunk_idx = int(meta.get("chunk_id", 0))
+        except (TypeError, ValueError):
+            chunk_idx = 0
+        packet = None
+        if record_type == "packet":
+            try:
+                packet_raw = meta.get("context_packet")
+                packet = json.loads(str(packet_raw)) if packet_raw else None
+            except (TypeError, ValueError, json.JSONDecodeError):
+                packet = None
+        return SearchCandidate(
+            source_file=str(meta.get("source_file", "")),
+            chunk_idx=chunk_idx,
+            semantic_score=0.0,
+            context=str(doc_text or ""),
+            record_type=record_type,
+            packet=packet,
+            metadata=meta,
+        )
+
+    def _rerank_text(self, candidate: SearchCandidate) -> str:
+        if candidate.packet:
+            parts = [
+                str(candidate.packet.get("source", candidate.source_file)),
+                str(candidate.packet.get("rule", "")),
+                str(candidate.packet.get("summary", "")),
+                str(candidate.packet.get("decision", "")),
+                str(candidate.packet.get("context", "")),
+            ]
+            text = "\n".join(part for part in parts if part).strip()
+            if text:
+                return text
+        return f"{candidate.source_file}\n{candidate.context}".strip()
+
     def search(
         self,
         query: str,
         top_k: int | None = None,
         include_inactive: bool = False,
+        path_prefix: str | None = None,
     ) -> list[SearchResult]:
         requested_k = top_k if top_k is not None and top_k > 0 else self.settings.top_k
         k = min(requested_k, int(getattr(self.settings, "max_top_k", 20)))
@@ -1159,7 +1460,9 @@ class KnowledgeIndex:
         metas = res.get("metadatas", [[]])[0]
         distances = res.get("distances", [[]])[0]
 
-        candidates: list[SearchCandidate] = []
+        scope = _normalise_path_prefix(path_prefix)
+        candidates_by_id: dict[str, SearchCandidate] = {}
+        dense_order: list[str] = []
         for i, chunk_id in enumerate(ids):
             score = 1.0 - float(distances[i]) if i < len(distances) else 0.0
             meta = metas[i] if i < len(metas) else {}
@@ -1167,6 +1470,8 @@ class KnowledgeIndex:
             if not isinstance(meta, dict):
                 meta = {}
             source_file = str(meta.get("source_file", ""))
+            if scope and not _path_within_scope(source_file, scope):
+                continue
             record_type = str(meta.get("record_type", "chunk"))
             try:
                 chunk_idx = int(meta.get("chunk_id", 0))
@@ -1182,24 +1487,82 @@ class KnowledgeIndex:
                     packet = json.loads(str(packet_raw)) if packet_raw else None
                 except (TypeError, ValueError, json.JSONDecodeError):
                     packet = None
-            candidates.append(
-                SearchCandidate(
-                    source_file=source_file,
-                    chunk_idx=chunk_idx,
-                    semantic_score=score,
-                    context=str(doc_text),
-                    record_type=record_type,
-                    packet=packet,
-                    metadata=meta,
-                )
+            candidate = SearchCandidate(
+                source_file=source_file,
+                chunk_idx=chunk_idx,
+                semantic_score=score,
+                context=str(doc_text),
+                record_type=record_type,
+                packet=packet,
+                metadata=meta,
+                dense_rank=len(dense_order),
+            )
+            candidates_by_id[str(chunk_id)] = candidate
+            dense_order.append(str(chunk_id))
+
+        hybrid_enabled = bool(getattr(self.settings, "hybrid_search", True))
+        lexical_hits = (
+            self._lexical_search(
+                query,
+                int(getattr(self.settings, "lexical_candidates", 50)),
+                scope,
+            )
+            if hybrid_enabled
+            else []
+        )
+
+        if not lexical_hits:
+            # Dense-only path preserves exact behaviour when the lexical index is
+            # empty (e.g. cold corpus) or hybrid retrieval is disabled.
+            ordered = self._order_ranked_candidates(
+                list(candidates_by_id.values()),
+                include_inactive,
+                self.settings.min_relevance,
+            )
+        else:
+            lexical_min_score = float(getattr(self.settings, "lexical_min_score", 0.35))
+            for lex_rank, (doc_id, norm, matched, meta, doc_text) in enumerate(lexical_hits):
+                existing = candidates_by_id.get(doc_id)
+                if existing is not None:
+                    existing.lexical_rank = lex_rank
+                    existing.lexical_score = norm
+                    continue
+                # A lexical-only hit must clear the score floor and represent a
+                # discriminative match — a rare identifier/code/config key, or at
+                # least two distinct query terms — so a single shared common word
+                # cannot manufacture a match for an otherwise-negative query.
+                if norm < lexical_min_score:
+                    continue
+                if len(matched) < 2 and not any(is_identifier_like(term) for term in matched):
+                    continue
+                candidate = self._candidate_from_metadata(doc_id, meta, doc_text)
+                candidate.lexical_rank = lex_rank
+                candidate.lexical_score = norm
+                candidates_by_id[doc_id] = candidate
+
+            rrf_k = int(getattr(self.settings, "rrf_k", 60))
+            dense_weight = float(getattr(self.settings, "dense_weight", 1.0))
+            lexical_weight = float(getattr(self.settings, "lexical_weight", 1.0))
+            for candidate in candidates_by_id.values():
+                fused = 0.0
+                if candidate.dense_rank is not None:
+                    fused += dense_weight / (rrf_k + candidate.dense_rank + 1)
+                if candidate.lexical_rank is not None:
+                    fused += lexical_weight / (rrf_k + candidate.lexical_rank + 1)
+                candidate.fused_score = fused
+            best_fused = max((c.fused_score for c in candidates_by_id.values()), default=0.0)
+            if best_fused > 0.0:
+                for candidate in candidates_by_id.values():
+                    candidate.fused_score /= best_fused
+
+            ordered = self._order_hybrid_candidates(
+                list(candidates_by_id.values()),
+                include_inactive,
+                self.settings.min_relevance,
             )
 
-        ranked = self._select_ranked_candidates(
-            candidates,
-            k,
-            include_inactive,
-            self.settings.min_relevance,
-        )
+        ordered = self._rerank_pool(query, ordered)
+        ranked = self._apply_source_diversity(ordered, k)
 
         if self.settings.merge_adjacent_window <= 0:
             return [
@@ -1275,6 +1638,232 @@ class KnowledgeIndex:
     def list_docs(self) -> list[str]:
         manifest = self._read_manifest()
         return sorted(manifest.get("files", {}).keys())
+
+    def wiki_signature(self) -> dict[str, list[int]]:
+        """Cheap filesystem fingerprint of every wiki note (mtime + size).
+
+        The watcher compares successive signatures to reindex only the notes that
+        actually changed, instead of re-scanning and re-embedding the whole wiki
+        on every interval. Editor-driven writes already trigger targeted reindex,
+        so this only has to catch out-of-band edits.
+        """
+        signature: dict[str, list[int]] = {}
+        for rel in relative_md_paths(self.settings.wiki_root):
+            full = self.settings.wiki_root / rel
+            try:
+                stat = full.stat()
+            except OSError:
+                continue
+            signature[str(rel).replace("\\", "/")] = [stat.st_mtime_ns, stat.st_size]
+        return signature
+
+    def _note_summary(self, rel: str, record: dict[str, Any]) -> dict[str, Any]:
+        frontmatter_meta = record.get("frontmatter", {}) or {}
+        raw_kind = str(frontmatter_meta.get("kind", "") or "").strip().lower()
+        kind = raw_kind if raw_kind in NOTE_KINDS else None
+        status = str(frontmatter_meta.get("status", "") or "").strip() or None
+        last_verified = _normalise_date(frontmatter_meta.get("last_verified"))
+        verified_date = _parse_last_verified(last_verified)
+        if verified_date is None:
+            freshness_state = "unknown"
+        elif verified_date < date.today() - timedelta(days=self.settings.staleness_days):
+            freshness_state = "stale"
+        else:
+            freshness_state = "current"
+        return {
+            "path": rel,
+            "name": PurePosixPath(rel).name,
+            "id": str(frontmatter_meta.get("id", "") or "").strip() or None,
+            "kind": kind,
+            "status": status,
+            "last_verified": last_verified,
+            "freshness_state": freshness_state,
+            "evidence_summary": record.get("evidence_summary", ""),
+        }
+
+    def tree(
+        self,
+        path_prefix: str | None = None,
+        max_depth: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a navigable directory tree of indexed notes with light metadata.
+
+        Navigation reads cached manifest frontmatter only; it never recompiles
+        packets, so it is cheap enough to call before every retrieval decision.
+        """
+        scope = _normalise_path_prefix(path_prefix)
+        manifest_files = self._read_manifest().get("files", {})
+        notes = [
+            self._note_summary(rel, record)
+            for rel, record in sorted(manifest_files.items())
+            if _path_within_scope(rel, scope)
+        ]
+
+        root: dict[str, Any] = {"type": "dir", "name": scope or "", "children": []}
+        dir_index: dict[str, dict[str, Any]] = {"": root}
+
+        def ensure_dir(parts: tuple[str, ...]) -> dict[str, Any]:
+            key = ""
+            parent = root
+            for part in parts:
+                key = f"{key}/{part}" if key else part
+                node = dir_index.get(key)
+                if node is None:
+                    node = {"type": "dir", "name": part, "children": []}
+                    dir_index[key] = node
+                    parent["children"].append(node)
+                parent = node
+            return parent
+
+        scope_parts = tuple(p for p in scope.split("/") if p) if scope and not scope.endswith(".md") else ()
+        for note in notes:
+            rel_parts = tuple(p for p in PurePosixPath(note["path"]).parts)
+            relative_parts = rel_parts[len(scope_parts):] if rel_parts[: len(scope_parts)] == scope_parts else rel_parts
+            dir_parts = relative_parts[:-1]
+            if max_depth is not None and len(dir_parts) > max_depth:
+                dir_parts = dir_parts[:max_depth]
+            parent = ensure_dir(dir_parts)
+            parent["children"].append({"type": "note", **note})
+
+        by_kind: dict[str, int] = {}
+        by_status: dict[str, int] = {}
+        for note in notes:
+            key = note["kind"] or "untyped"
+            by_kind[key] = by_kind.get(key, 0) + 1
+            if note["status"]:
+                by_status[note["status"]] = by_status.get(note["status"], 0) + 1
+
+        return {
+            "path": scope,
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "total_notes": len(notes),
+            "summary": {
+                "by_kind": dict(sorted(by_kind.items())),
+                "by_status": dict(sorted(by_status.items())),
+            },
+            "tree": root,
+        }
+
+    @staticmethod
+    def compose_investigation_note(
+        *,
+        title: str,
+        context: str,
+        findings: list[str],
+        use_this_when: str = "",
+        eliminated_approaches: list[str] | None = None,
+        scope_and_completeness: str = "",
+        evidence: list[str] | None = None,
+        retrieval_hints: list[str] | None = None,
+        applies_to: list[str] | None = None,
+        note_id: str | None = None,
+        scope: str = "project-specific",
+    ) -> str:
+        """Render a well-formed, unverified `investigation` note for capture.
+
+        Captured session memory is deliberately written as `status: pending`
+        without `last_verified`, so retrieval and audits surface it as an
+        advisory candidate that a later Maintain/Audit pass promotes or drops.
+        """
+
+        def bullet_block(items: list[str] | None, empty: str) -> str:
+            cleaned = [str(item).strip() for item in (items or []) if str(item).strip()]
+            if not cleaned:
+                return empty
+            return "\n".join(f"- {item}" for item in cleaned)
+
+        resolved_id = _slugify_note_title(note_id or title)
+        applies_lines = "".join(
+            f"\n  - {str(item).strip()}"
+            for item in (applies_to or [])
+            if str(item).strip()
+        )
+        use_this = use_this_when.strip() or f"Retrieving prior findings about {title.strip()}."
+        context_text = context.strip() or "Captured from a working session; context not yet consolidated."
+        scope_text = (
+            scope_and_completeness.strip()
+            or "Unverified session capture; scope and completeness not yet confirmed."
+        )
+        frontmatter_lines = [
+            "---",
+            f"id: {resolved_id}",
+            "kind: investigation",
+            f"scope: {scope.strip() or 'project-specific'}",
+            "status: pending",
+            f"applies_to:{applies_lines}" if applies_lines else "applies_to: []",
+            "---",
+        ]
+        body = [
+            f"# {title.strip()}",
+            "",
+            "## Use this when",
+            "",
+            use_this,
+            "",
+            "## Context",
+            "",
+            context_text,
+            "",
+            "## Findings",
+            "",
+            bullet_block(findings, "- Not yet recorded."),
+            "",
+            "## Eliminated approaches",
+            "",
+            bullet_block(eliminated_approaches, "- None recorded."),
+            "",
+            "## Scope and completeness",
+            "",
+            scope_text,
+            "",
+            "## Evidence",
+            "",
+            bullet_block(evidence, "- Not yet corroborated against code."),
+            "",
+            "## Retrieval hints",
+            "",
+            bullet_block(retrieval_hints, f"- {title.strip()}"),
+            "",
+        ]
+        return "\n".join(frontmatter_lines) + "\n\n" + "\n".join(body)
+
+    def capture(
+        self,
+        *,
+        title: str,
+        context: str,
+        findings: list[str],
+        use_this_when: str = "",
+        eliminated_approaches: list[str] | None = None,
+        scope_and_completeness: str = "",
+        evidence: list[str] | None = None,
+        retrieval_hints: list[str] | None = None,
+        applies_to: list[str] | None = None,
+        path: str | None = None,
+        expected_hash: str | None = None,
+    ) -> dict[str, Any]:
+        if not str(title or "").strip():
+            return {"status": "error", "reason": "title_required"}
+        capture_dir = str(getattr(self.settings, "capture_dir", "investigations")).strip("/") or "investigations"
+        slug = _slugify_note_title(title)
+        rel_path = str(path).replace("\\", "/").strip("/") if path else f"{capture_dir}/{slug}.md"
+        content = self.compose_investigation_note(
+            title=title,
+            context=context,
+            findings=findings,
+            use_this_when=use_this_when,
+            eliminated_approaches=eliminated_approaches,
+            scope_and_completeness=scope_and_completeness,
+            evidence=evidence,
+            retrieval_hints=retrieval_hints,
+            applies_to=applies_to,
+            note_id=slug,
+        )
+        result = self.write_doc(rel_path, content, expected_hash)
+        if result.get("status") == "ok":
+            result["kind"] = "investigation"
+            result["note_status"] = "pending"
+        return result
 
     def _resolve_wiki_markdown_path(self, rel_path: str) -> Path:
         if not isinstance(rel_path, str) or not rel_path.strip():

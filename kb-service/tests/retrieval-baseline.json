@@ -1,10 +1,11 @@
 {
   "dataset": "project-rag-wiki-synthetic-retrieval-v1",
-  "measured_utc": "2026-07-18",
-  "service_version": "0.0.18",
-  "index_schema_version": 6,
-  "mcp_tool_contract_version": 4,
+  "measured_utc": "2026-08-23",
+  "service_version": "0.1.1",
+  "index_schema_version": 7,
+  "mcp_tool_contract_version": 5,
   "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_runtime": "onnxruntime (ChromaDB-bundled)",
   "minimum_relevance": 0.35,
   "top_k": 3,
   "metrics": {
@@ -16,7 +17,7 @@
     "duplicate_source_rate": 0.21739130434782608,
     "miss_precision": 1.0,
     "negative_query_pass_rate": 1.0,
-    "max_response_bytes": 1748,
+    "max_response_bytes": 1747,
     "max_result_bytes": 1240,
     "max_approximate_response_tokens": 597,
     "payload_pass_rate": 1.0
@@ -39,5 +40,5 @@
       "gate_passed": false
     }
   ],
-  "model_decision": "Retain all-MiniLM-L6-v2. Consumer-derived challenger measurements are historical evidence only; future release decisions must pass the repository-owned synthetic corpus."
+  "model_decision": "Retain all-MiniLM-L6-v2, now served via ChromaDB-bundled ONNX Runtime instead of the PyTorch/sentence-transformers stack; the ONNX runtime reproduces the baseline retrieval metrics on the repository-owned synthetic corpus. Consumer-derived challenger measurements are historical evidence only; future release decisions must pass this repository-owned synthetic corpus."
 }

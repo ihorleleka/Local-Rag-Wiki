@@ -33,11 +33,11 @@ jobs:
         with:
           node-version: 20
       - name: Apply tag version to wiki-kit package
-        run: npm --prefix wiki-kit pkg set version="${{ needs.resolve-version.outputs.version }}"
+        run: npm pkg set version="${{ needs.resolve-version.outputs.version }}"
       - name: Verify wiki-kit version and run checks
         run: |
-          test "$(node -p "require('./wiki-kit/package.json').version")" = "${{ needs.resolve-version.outputs.version }}"
-          npm --prefix wiki-kit run verify
+          test "$(node -p "require('./package.json').version")" = "${{ needs.resolve-version.outputs.version }}"
+          npm run verify
 
   verify-kb-service:
     runs-on: ubuntu-latest

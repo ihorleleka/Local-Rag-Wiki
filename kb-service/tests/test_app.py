@@ -6,6 +6,7 @@ import sys
 import threading
 import types
 import unittest
+from contextlib import asynccontextmanager
 from threading import Lock
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,8 +44,8 @@ class DummyKnowledgeIndex:
         self.reindex_calls += 1
         return {"changed": 1, "removed": 0, "total_files": 1}
 
-    def search(self, query, top_k=None, include_inactive=False):
-        self.search_calls.append((query, top_k, include_inactive))
+    def search(self, query, top_k=None, include_inactive=False, path_prefix=None):
+        self.search_calls.append((query, top_k, include_inactive, path_prefix))
         return self.search_results
 
     def read_doc(self, path):
@@ -53,6 +54,33 @@ class DummyKnowledgeIndex:
 
     def list_docs(self):
         return ["wiki/page.md"]
+
+    def tree(self, path_prefix=None, max_depth=None):
+        self.tree_calls = getattr(self, "tree_calls", [])
+        self.tree_calls.append((path_prefix, max_depth))
+        return {
+            "path": path_prefix or "",
+            "total_notes": 1,
+            "summary": {"by_kind": {"reference": 1}, "by_status": {"active": 1}},
+            "tree": {
+                "type": "dir",
+                "name": path_prefix or "",
+                "children": [
+                    {"type": "note", "path": "wiki/page.md", "name": "page.md", "kind": "reference"}
+                ],
+            },
+        }
+
+    def capture(self, **kwargs):
+        self.capture_calls = getattr(self, "capture_calls", [])
+        self.capture_calls.append(kwargs)
+        return {
+            "status": "ok",
+            "path": f"investigations/{kwargs.get('title', 'x').lower()}.md",
+            "content_hash": "capture-hash",
+            "kind": "investigation",
+            "note_status": "pending",
+        }
 
     def schema_report(self):
         return {"schema_version": 4, "total_files": 1, "summary": {"files_with_issues": 0}, "files": []}
@@ -107,15 +135,17 @@ class DummyFastAPI:
         self.mounts.append((path, app))
 
 
-class DummySessionManager:
-    def run(self):
-        return self
+class DummyHttpApp:
+    def __init__(self):
+        self.lifespan_entered = False
 
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb):
-        return False
+    @asynccontextmanager
+    async def lifespan(self, app):
+        self.lifespan_entered = True
+        try:
+            yield self
+        finally:
+            self.lifespan_entered = False
 
 
 class DummyMCP:
@@ -124,13 +154,14 @@ class DummyMCP:
     def __init__(self, name, instructions=None):
         self.name = name
         self.instructions = instructions
-        self.settings = types.SimpleNamespace(streamable_http_path=None)
-        self.session_manager = DummySessionManager()
         self.tools: list[tuple[str, object]] = []
+        self.http_apps: list[DummyHttpApp] = []
         DummyMCP.last_instance = self
 
-    def streamable_http_app(self):
-        return "dummy-mcp-app"
+    def http_app(self, path=None):
+        app = DummyHttpApp()
+        self.http_apps.append(app)
+        return app
 
     def tool(self):
         def decorator(func):
@@ -147,19 +178,16 @@ def install_fakes():
     responses_module = types.ModuleType("fastapi.responses")
     responses_module.JSONResponse = DummyJSONResponse
 
-    mcp_server_module = types.ModuleType("mcp.server")
-    fastmcp_module = types.ModuleType("mcp.server.fastmcp")
+    fastmcp_module = types.ModuleType("fastmcp")
     fastmcp_module.FastMCP = DummyMCP
 
     indexer_module = types.ModuleType("kb_service.indexer")
     indexer_module.KnowledgeIndex = DummyKnowledgeIndex
-    indexer_module.INDEX_SCHEMA_VERSION = 6
+    indexer_module.INDEX_SCHEMA_VERSION = 7
 
     sys.modules["fastapi"] = fastapi_module
     sys.modules["fastapi.responses"] = responses_module
-    sys.modules["mcp"] = types.ModuleType("mcp")
-    sys.modules["mcp.server"] = mcp_server_module
-    sys.modules["mcp.server.fastmcp"] = fastmcp_module
+    sys.modules["fastmcp"] = fastmcp_module
     sys.modules["kb_service.indexer"] = indexer_module
 
 
@@ -188,9 +216,14 @@ class AppBehaviorTests(unittest.TestCase):
                 "wiki_write",
                 "wiki_delete",
                 "wiki_rename",
+                "wiki_tree",
+                "wiki_capture",
             ],
         )
-        self.assertEqual(app.mounts, [("/mcp/", "dummy-mcp-app"), ("/mcp", "dummy-mcp-app")])
+        self.assertEqual(
+            app.mounts,
+            [("/mcp/", DummyMCP.last_instance.http_apps[0]), ("/mcp", DummyMCP.last_instance.http_apps[0])],
+        )
         self.assertLessEqual(len(DummyMCP.last_instance.instructions), 512)
         for phrase in [
             "search is advisory",
@@ -297,7 +330,7 @@ class AppBehaviorTests(unittest.TestCase):
         )
         self.assertEqual(
             result["diagnostics"],
-            {"miss": False, "result_count": 1, "minimum_relevance": 0.35},
+            {"miss": False, "result_count": 1, "minimum_relevance": 0.35, "depth": "packet"},
         )
 
     def test_read_tool_returns_content_with_concurrency_hash(self) -> None:
@@ -323,6 +356,13 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertIn("knowledge gap", result["diagnostics"]["message"])
         self.assertNotIn("error", result["diagnostics"])
 
+    def test_signature_changes_reports_added_modified_and_removed(self) -> None:
+        changes = self.app_module.signature_changes
+        previous = {"a.md": [1, 10], "b.md": [2, 20], "c.md": [3, 30]}
+        current = {"a.md": [1, 10], "b.md": [9, 25], "d.md": [4, 40]}
+        self.assertEqual(changes(previous, current), {"b.md", "c.md", "d.md"})
+        self.assertEqual(changes(current, current), set())
+
     def test_version_endpoint_exposes_compatibility_contract(self) -> None:
         app = self.app_module.create_app()
 
@@ -331,8 +371,8 @@ class AppBehaviorTests(unittest.TestCase):
 
         result = asyncio.run(read_version())
         self.assertEqual(result["service"], "kb-service")
-        self.assertEqual(result["index_schema_version"], 6)
-        self.assertEqual(result["mcp_tool_contract_version"], 4)
+        self.assertEqual(result["index_schema_version"], 7)
+        self.assertEqual(result["mcp_tool_contract_version"], 5)
         self.assertIsInstance(result["service_version"], str)
 
     def test_packet_search_fixtures_are_canonical_compact_and_bounded(self) -> None:
@@ -381,6 +421,84 @@ class AppBehaviorTests(unittest.TestCase):
                 self.assertEqual(packet_result["packet"]["freshness_state"], "current")
                 self.assertEqual(packet_result["packet"]["evidence_state"], "present")
                 self.assertNotIn("confidence", packet_result["packet"])
+
+    def test_search_abstract_depth_returns_l0_items(self) -> None:
+        app = self.app_module.create_app()
+        search = DummyMCP.last_instance.tools[0][1]
+        DummyKnowledgeIndex.last_instance.search_results = [
+            types.SimpleNamespace(
+                source_file="components/page.md",
+                chunk_id="packet",
+                score=0.88,
+                context="embedding text",
+                record_type="packet",
+                context_packet={
+                    "kind": "reference",
+                    "source": "components/page.md",
+                    "rule": "Own the page contract.",
+                    "schema_health": "complete",
+                    "freshness_state": "current",
+                    "evidence_state": "present",
+                    "verification_required": False,
+                    "summary": "S" * 2000,
+                },
+                metadata={},
+            )
+        ]
+
+        result = search("page contract", None, False, "abstract")
+        item = result["results"][0]
+
+        self.assertEqual(result["diagnostics"]["depth"], "abstract")
+        self.assertEqual(item["tier"], "L0")
+        self.assertEqual(item["source"], "components/page.md")
+        self.assertEqual(item["abstract"], "Own the page contract.")
+        self.assertNotIn("packet", item)
+        self.assertEqual(item["trust"]["schema_health"], "complete")
+
+    def test_search_forwards_path_prefix_scope(self) -> None:
+        app = self.app_module.create_app()
+        search = DummyMCP.last_instance.tools[0][1]
+
+        result = search("query", 3, False, "packet", "components")
+
+        self.assertEqual(
+            DummyKnowledgeIndex.last_instance.search_calls[-1],
+            ("query", 3, False, "components"),
+        )
+        self.assertEqual(result["diagnostics"]["path_prefix"], "components")
+
+    def test_wiki_tree_tool_returns_navigable_structure(self) -> None:
+        app = self.app_module.create_app()
+        tree = DummyMCP.last_instance.tools[7][1]
+
+        result = tree("components", 2)
+
+        self.assertEqual(DummyKnowledgeIndex.last_instance.tree_calls[-1], ("components", 2))
+        self.assertEqual(result["tree"]["type"], "dir")
+        self.assertEqual(result["total_notes"], 1)
+
+    def test_wiki_capture_creates_pending_investigation_and_reindexes(self) -> None:
+        app = self.app_module.create_app()
+        capture = DummyMCP.last_instance.tools[8][1]
+
+        async def run_capture_checks():
+            async with app.lifespan(app):
+                result = await capture(
+                    "Flaky retry root cause",
+                    "Investigated intermittent retries.",
+                    ["Backoff timer was never reset."],
+                )
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["note_status"], "pending")
+                self.assertEqual(result["index_status"], "ok")
+                self.assertEqual(
+                    DummyKnowledgeIndex.last_instance.capture_calls[-1]["findings"],
+                    ["Backoff timer was never reset."],
+                )
+                self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
+
+        asyncio.run(run_capture_checks())
 
     def test_compact_packet_keeps_capability_decision_fields(self) -> None:
         packet = self.app_module.compact_context_packet(

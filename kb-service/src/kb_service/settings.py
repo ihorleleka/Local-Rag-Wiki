@@ -24,6 +24,17 @@ class Settings:
     evidence_max_anchors: int
     watch_interval_seconds: int
     startup_reindex_timeout_seconds: int
+    capture_dir: str
+    hybrid_search: bool
+    lexical_candidates: int
+    rrf_k: int
+    dense_weight: float
+    lexical_weight: float
+    lexical_min_score: float
+    evidence_changed_penalty: float
+    reranker_enabled: bool
+    reranker_model_path: str
+    reranker_top_n: int
 
     @staticmethod
     def load() -> "Settings":
@@ -56,4 +67,15 @@ class Settings:
             evidence_max_anchors=max(1, int(os.getenv("KB_EVIDENCE_MAX_ANCHORS", "12"))),
             watch_interval_seconds=int(os.getenv("KB_WATCH_INTERVAL_SECONDS", "15")),
             startup_reindex_timeout_seconds=max(1, int(os.getenv("KB_STARTUP_REINDEX_TIMEOUT_SECONDS", "3"))),
+            capture_dir=(os.getenv("KB_CAPTURE_DIR", "investigations").strip("/") or "investigations"),
+            hybrid_search=os.getenv("KB_HYBRID_SEARCH", "1").strip().lower() not in {"0", "false", "no", "off"},
+            lexical_candidates=max(1, int(os.getenv("KB_LEXICAL_CANDIDATES", "50"))),
+            rrf_k=max(1, int(os.getenv("KB_RRF_K", "60"))),
+            dense_weight=max(0.0, float(os.getenv("KB_DENSE_WEIGHT", "1.0"))),
+            lexical_weight=max(0.0, float(os.getenv("KB_LEXICAL_WEIGHT", "1.0"))),
+            lexical_min_score=max(0.0, min(1.0, float(os.getenv("KB_LEXICAL_MIN_SCORE", "0.35")))),
+            evidence_changed_penalty=max(0.0, min(1.0, float(os.getenv("KB_EVIDENCE_CHANGED_PENALTY", "0.05")))),
+            reranker_enabled=os.getenv("KB_RERANKER", "0").strip().lower() in {"1", "true", "yes", "on"},
+            reranker_model_path=os.getenv("KB_RERANKER_MODEL_PATH", "").strip(),
+            reranker_top_n=max(1, int(os.getenv("KB_RERANKER_TOP_N", "20"))),
         )

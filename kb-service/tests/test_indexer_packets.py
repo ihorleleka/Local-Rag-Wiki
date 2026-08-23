@@ -83,7 +83,7 @@ def install_fakes():
     sys.modules["frontmatter"] = frontmatter_module
 
     embeddings_module = types.ModuleType("kb_service.embeddings")
-    embeddings_module.LocalSentenceTransformerProvider = DummyProvider
+    embeddings_module.OnnxMiniLmProvider = DummyProvider
     sys.modules["kb_service.embeddings"] = embeddings_module
 
 
@@ -324,6 +324,149 @@ Raw chunks remain available as fallback when no packet matches.
         self.assertIn("MCP image support contract", packet.metadata["retrieval_hints"])
         self.assertNotIn("raw_prose", packet.metadata)
         self.assertNotIn("Raw prose:", packet.index_text)
+
+    def test_compile_context_packet_supports_investigation_notes(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            settings = types.SimpleNamespace(
+                wiki_root=Path(tmpdir) / "wiki",
+                kb_root=Path(tmpdir) / "kb",
+                embedding_model="dummy",
+                staleness_days=90,
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+            body = """# Flaky Retry Investigation
+
+## Use this when
+Retry storms reappear in the scheduler.
+
+## Context
+Intermittent duplicate retries under load.
+
+## Findings
+- Backoff timer was never reset after a success.
+- The jitter window collapsed to zero at high concurrency.
+
+## Eliminated approaches
+- Increasing the global retry cap did not help.
+
+## Scope and completeness
+Covers the scheduler retry path only; queue consumers not audited.
+
+## Evidence
+- src/kb_service/indexer.py
+
+## Retrieval hints
+- scheduler retry backoff
+"""
+            packet = index.compile_context_packet(
+                "investigations/flaky-retry.md",
+                {
+                    "id": "flaky-retry",
+                    "kind": "investigation",
+                    "scope": "project-specific",
+                    "last_verified": date.today().isoformat(),
+                    "status": "active",
+                },
+                body,
+            )
+
+        self.assertIsNotNone(packet)
+        assert packet is not None
+        self.assertEqual(packet.kind, "investigation")
+        structured = packet.metadata["context_packet"]
+        self.assertEqual(structured["kind"], "investigation")
+        self.assertIn("Backoff timer was never reset after a success.", structured["findings"])
+        self.assertEqual(structured["context"], "Intermittent duplicate retries under load.")
+        self.assertIn("Increasing the global retry cap did not help.", structured["eliminated_approaches"])
+        self.assertTrue(structured["scope_and_completeness"])
+        self.assertEqual(packet.schema_health, "complete")
+        self.assertIn("Findings:", packet.index_text)
+
+    def test_investigation_kind_inferred_from_findings_sections(self) -> None:
+        module = self.indexer_module
+        kind, explicit = module._normalise_kind("", {"findings": "x"})
+        self.assertEqual(kind, "investigation")
+        self.assertFalse(explicit)
+
+    def test_path_scope_helpers_restrict_to_subtree(self) -> None:
+        module = self.indexer_module
+        self.assertEqual(module._normalise_path_prefix("/components/"), "components")
+        self.assertTrue(module._path_within_scope("components/page.md", "components"))
+        self.assertFalse(module._path_within_scope("integrations/app.md", "components"))
+        self.assertTrue(module._path_within_scope("components/page.md", "components/page.md"))
+        self.assertFalse(module._path_within_scope("components/page.md", "components/other.md"))
+
+    def test_capture_writes_pending_investigation_and_conflicts_on_repeat(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            wiki_root = Path(tmpdir) / "wiki"
+            wiki_root.mkdir()
+            settings = types.SimpleNamespace(
+                wiki_root=wiki_root,
+                kb_root=Path(tmpdir) / "kb",
+                embedding_model="dummy",
+                staleness_days=90,
+                capture_dir="investigations",
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+
+            result = index.capture(
+                title="Flaky Retry Root Cause",
+                context="Intermittent duplicate retries under load.",
+                findings=["Backoff timer was never reset."],
+                evidence=["src/kb_service/indexer.py"],
+            )
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["path"], "investigations/flaky-retry-root-cause.md")
+            self.assertEqual(result["note_status"], "pending")
+            written = (wiki_root / "investigations" / "flaky-retry-root-cause.md").read_text(encoding="utf-8")
+            self.assertIn("kind: investigation", written)
+            self.assertIn("status: pending", written)
+            self.assertNotIn("last_verified", written)
+            self.assertIn("Backoff timer was never reset.", written)
+
+            packet = index.compile_context_packet(
+                "investigations/flaky-retry-root-cause.md",
+                {"id": "flaky-retry-root-cause", "kind": "investigation", "status": "pending"},
+                written.split("---", 2)[-1],
+            )
+            self.assertIsNotNone(packet)
+
+            conflict = index.capture(
+                title="Flaky Retry Root Cause",
+                context="Second attempt.",
+                findings=["Different finding."],
+            )
+            self.assertEqual(conflict["status"], "conflict")
+
+    def test_tree_reports_navigable_structure_from_manifest(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            wiki_root = Path(tmpdir) / "wiki"
+            (wiki_root / "components").mkdir(parents=True)
+            (wiki_root / "index.md").write_text("# Index\n\n## Summary\n\nMap.\n", encoding="utf-8")
+            (wiki_root / "components" / "page.md").write_text(
+                "# Page\n\n## Summary\n\nPage contract.\n", encoding="utf-8"
+            )
+            settings = types.SimpleNamespace(
+                wiki_root=wiki_root,
+                kb_root=Path(tmpdir) / "kb",
+                embedding_model="dummy",
+                staleness_days=90,
+                chunk_tokens=32,
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+            index.reindex()
+
+            full = index.tree()
+            self.assertEqual(full["total_notes"], 2)
+            top_level = {child["name"]: child for child in full["tree"]["children"]}
+            self.assertIn("components", top_level)
+            self.assertEqual(top_level["components"]["type"], "dir")
+
+            scoped = index.tree(path_prefix="components")
+            self.assertEqual(scoped["total_notes"], 1)
+            scoped_notes = [c for c in scoped["tree"]["children"] if c["type"] == "note"]
+            self.assertEqual(scoped_notes[0]["path"], "components/page.md")
 
     def test_compile_context_packet_supports_reference_notes(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -800,6 +943,7 @@ class RankingTests(unittest.TestCase):
         verification_required: bool = False,
         status: str = "active",
         chunk_idx: int = 0,
+        evidence_state: str = "present",
     ):
         packet = None
         if record_type == "packet":
@@ -808,6 +952,7 @@ class RankingTests(unittest.TestCase):
                 "rule": f"Owner contract for {source}",
                 "verification_required": verification_required,
                 "status": status,
+                "evidence_state": evidence_state,
             }
         return self.indexer_module.SearchCandidate(
             source_file=source,
@@ -850,6 +995,35 @@ class RankingTests(unittest.TestCase):
         )
 
         self.assertIs(ranked[0], chunk)
+
+    def test_changed_evidence_packet_is_auto_demoted(self) -> None:
+        # Same relevance for two owner packets; the one whose evidence changed
+        # since verification must be demoted so drift self-corrects.
+        fresh = self.candidate("fresh.md", 0.70, "packet")
+        drifted = self.candidate(
+            "drifted.md",
+            0.70,
+            "packet",
+            verification_required=True,
+            evidence_state="changed_since_verification",
+        )
+
+        self.assertGreater(fresh.ranking_score, drifted.ranking_score)
+        ranked = self.indexer_module.KnowledgeIndex._select_ranked_candidates(
+            [drifted, fresh], 2
+        )
+        self.assertIs(ranked[0], fresh)
+
+    def test_missing_evidence_incurs_extra_penalty_over_unverified(self) -> None:
+        unverified = self.candidate("a.md", 0.70, "packet", verification_required=True)
+        missing = self.candidate(
+            "b.md",
+            0.70,
+            "packet",
+            verification_required=True,
+            evidence_state="missing",
+        )
+        self.assertGreater(unverified.ranking_score, missing.ranking_score)
 
     def test_source_diversity_prevents_one_note_filling_results(self) -> None:
         candidates = [

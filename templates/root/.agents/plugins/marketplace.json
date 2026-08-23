@@ -1,0 +1,21 @@
+{
+  "name": "local-rag-wiki",
+  "description": "A per-repository, Docker-hosted MCP knowledge service that gives coding agents a governed Markdown wiki with semantic retrieval. The promise — a local RAG wiki that accumulates durable project knowledge across agentic sessions — is real and the implementation is genuinely thoughtful, well beyond a toy. It's essentially long-term memory for agents, scoped to one repo, with guardrails against the wiki becoming a lie.",
+  "interface": {
+    "displayName": "Local-Rag-Wiki"
+  },
+  "plugins": [
+    {
+      "name": "wiki-kit-self-evolving",
+      "source": {
+        "source": "local",
+        "path": ".agents"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_USE"
+      },
+      "category": "Knowledge"
+    }
+  ]
+}

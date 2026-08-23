@@ -102,7 +102,7 @@ def measure(scale: int) -> dict:
             staleness_days=90,
             evidence_max_anchors=12,
         )
-        with patch("kb_service.indexer.LocalSentenceTransformerProvider", DeterministicProvider):
+        with patch("kb_service.indexer.OnnxMiniLmProvider", DeterministicProvider):
             index = KnowledgeIndex(settings)
             initial_seconds, initial = elapsed(index.reindex)
             unchanged_seconds, unchanged = elapsed(index.reindex)

@@ -106,7 +106,7 @@ class RealChromaIntegrationTests(unittest.TestCase):
             )
             settings = self.settings(root, wiki)
 
-            with patch("kb_service.indexer.LocalSentenceTransformerProvider", DeterministicProvider):
+            with patch("kb_service.indexer.OnnxMiniLmProvider", DeterministicProvider):
                 index = KnowledgeIndex(settings)
                 first = index.reindex()
                 self.assertEqual(first["changed"], 2)
@@ -155,7 +155,7 @@ class RealChromaIntegrationTests(unittest.TestCase):
             )
             settings = self.settings(root, wiki)
             with (
-                patch("kb_service.indexer.LocalSentenceTransformerProvider", DeterministicProvider),
+                patch("kb_service.indexer.OnnxMiniLmProvider", DeterministicProvider),
                 patch.object(Settings, "load", return_value=settings),
                 TestClient(create_app()) as client,
             ):
@@ -163,8 +163,8 @@ class RealChromaIntegrationTests(unittest.TestCase):
                 self.assertEqual(health.status_code, 200)
                 self.assertEqual(health.json()["status"], "ok")
                 version = client.get("/version").json()
-                self.assertEqual(version["index_schema_version"], 6)
-                self.assertEqual(version["mcp_tool_contract_version"], 4)
+                self.assertEqual(version["index_schema_version"], 7)
+                self.assertEqual(version["mcp_tool_contract_version"], 5)
                 self.assertTrue(any(route.path.startswith("/mcp") for route in client.app.routes))
 
 

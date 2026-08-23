@@ -1,0 +1,7 @@
+{
+  "schemaVersion": 1,
+  "id": "local-rag-wiki",
+  "version": "0.1.0",
+  "clients": ["codex", "claude-code", "opencode", "vscode"],
+  "capabilities": ["mcp", "hooks", "rules", "skills"]
+}

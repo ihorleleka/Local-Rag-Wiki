@@ -43,8 +43,8 @@ def main() -> None:
     connection.request("GET", "/version")
     version = decode_response(connection.getresponse())
     connection.close()
-    assert version["index_schema_version"] == 6, version
-    assert version["mcp_tool_contract_version"] == 4, version
+    assert version["index_schema_version"] == 7, version
+    assert version["mcp_tool_contract_version"] == 5, version
 
     initialized, session = post(
         port,
@@ -70,8 +70,10 @@ def main() -> None:
         "wiki_search",
         "wiki_read",
         "wiki_list",
+        "wiki_tree",
         "wiki_schema_report",
         "wiki_write",
+        "wiki_capture",
         "wiki_delete",
         "wiki_rename",
     }

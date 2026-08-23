@@ -16,7 +16,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm --prefix wiki-kit run verify
+      - run: npm run verify
 
   wiki-kit-runner-integration:
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
@@ -30,8 +30,8 @@ jobs:
       - name: Pull pinned MCP image
         shell: bash
         run: |
-          image=$(node -p "require('./wiki-kit/templates/root/.agents/wiki-manager-contract.js').DEFAULT_IMAGE")
+          image=$(node -p "require('./templates/root/.agents/wiki-manager-contract.js').DEFAULT_IMAGE")
           docker pull "$image"
       - name: Exercise Docker and MCP runner
-        run: npm --prefix wiki-kit run verify:runner
+        run: npm run verify:runner
 
