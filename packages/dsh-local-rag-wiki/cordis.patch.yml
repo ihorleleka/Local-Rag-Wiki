@@ -1,0 +1,21 @@
+# DeepSeek Harness profile bundle for Local-Rag-Wiki.
+# The official MCP bridge owns child lifecycle, reconnect, discovery, and native
+# model-tool registration. The launcher resolves the active workspace's wiki-kit
+# installation marker, including custom --agents-dir installations.
+- insert:
+    - id: local-rag-wiki-lifecycle
+      name: '@ihorleleka/wiki-kit/dsh'
+    - id: local-rag-wiki-mcp
+      name: '@deepseek-ai/dsh-mcp-client'
+      config:
+        serverName: wiki-manager
+        transport: stdio
+        command: !!js process.execPath
+        args: [!!js require.resolve('@ihorleleka/wiki-kit/dsh-runner')]
+        cwd: !!js process.cwd()
+        toolCallTimeoutMs: 120000
+        failOnStartupError: false
+        reconnect:
+          enabled: true
+          initialDelayMs: 5000
+          maxAttempts: 5

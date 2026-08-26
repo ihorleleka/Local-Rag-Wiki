@@ -22,10 +22,49 @@ npx github:ihorleleka/Local-Rag-Wiki install .
 ```
 
 This scaffolds the managed `.agents/` runner, the `AGENTS.md` policy section,
-editor MCP config (`.claude/`, `.codex/`, `.vscode/`, `opencode.jsonc`), and a
-`wiki/` folder. The MCP service then starts automatically per repository when
-your agent client connects. Pre-pulling the image (above) is recommended before
-running the agent in a fresh environment.
+MCP config for DeepSeek Harness (`.dsh/mcp.servers.yml`), Claude Code, Codex,
+VS Code, and OpenCode, plus a `wiki/` folder. These integrations are additive:
+installing DSH support does not remove or replace the other harness configs.
+The MCP service then starts automatically per repository when your agent client
+connects. Pre-pulling the image (above) is recommended before running the agent
+in a fresh environment.
+
+## DeepSeek Harness
+
+Install the native DSH bundle once into the profile you use (usually `web`):
+
+```bash
+dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
+```
+
+Restart that DSH profile, open an installed repository as its workspace, and
+start a session. The bundle uses DSH's official `@deepseek-ai/dsh-mcp-client`
+to find the wiki-kit installation marker (including a custom `--agents-dir`),
+launch the managed MCP runner, reconnect it, discover its tools, and register
+them as native `mcp__wiki-manager__*` tools. The runner starts or attaches to
+the repository's Docker service exactly as it does for the other harnesses.
+
+It also mounts a marker-gated Cordis recall coordinator for that workspace:
+`agent/session-start` seeds recurring-topic hints; `agent/pre-step` uses local
+state, then performs bounded wiki retrieval only for a material prompt—first
+`wiki_search depth="abstract"` (L0), then matching `depth="packet"` context
+(L1). It labels the evidence and leaves full L2 `wiki_read` decisions to the
+model. `session/event` records an assistant summary, while `agent/turn-stopping`
+and `session/flush` trim and persist state. Recall is per-workspace cached and
+in-flight deduplicated; L1 packets are rate-limited, cold starts have a bounded
+90-second allowance, and state updates are queued with atomic replacement. No
+state or wiki process is used outside a repository with a wiki-kit install marker.
+
+The generated `.dsh/mcp.servers.yml` remains a workspace-config alternative;
+do not activate both bridges with the same `wiki-manager` namespace or DSH will
+rightly reject the duplicate tool registration. `AGENTS.md` remains the
+portable policy layer.
+
+The `.agents/hooks/` and `.claude/settings.local.json` hooks are Claude
+Code-specific. DSH lifecycle interception belongs in trusted Host/Profile
+Cordis plugins, not a project-local hook manifest. See
+[`.dsh/README.md`](./templates/root/.dsh/README.md) for the workspace-config
+boundary.
 
 ## Update
 

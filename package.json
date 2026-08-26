@@ -9,6 +9,17 @@
   "bin": {
     "wiki-kit": "bin/wiki-kit.js"
   },
+  "exports": {
+    "./dsh": "./packages/dsh-local-rag-wiki/index.mjs",
+    "./dsh-runner": "./packages/dsh-local-rag-wiki/workspace-runner.cjs",
+    "./dsh.bundle.patch": "./packages/dsh-local-rag-wiki/cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./packages/dsh-local-rag-wiki/cordis.patch.yml"
+    }
+  },
   "scripts": {
     "test": "npm run verify",
     "verify": "node scripts/verify.js",
@@ -18,9 +29,14 @@
     "bin/",
     "scripts/",
     "templates/",
+    "packages/dsh-local-rag-wiki/",
     "README.md"
   ],
   "license": "UNLICENSED",
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.7",
+    "@deepseek-ai/dsh-mcp-client": "^0.1.0-rc.1"
+  },
   "engines": {
     "node": ">=18"
   }

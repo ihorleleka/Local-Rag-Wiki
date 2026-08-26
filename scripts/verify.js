@@ -10,6 +10,7 @@ const DEFAULT_SMOKE_ROOT = path.join(ARTIFACTS_ROOT, "verify-smoke-default");
 const CUSTOM_SMOKE_ROOT = path.join(ARTIFACTS_ROOT, "verify-smoke-custom");
 const DEFAULT_PACKAGE_SOURCE = "github:ihorleleka/Local-Rag-Wiki";
 const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
+const DSH_BUNDLE_ROOT = path.join(ROOT, "packages", "dsh-local-rag-wiki");
 const {
   DEFAULT_IMAGE,
   COMPATIBILITY,
@@ -216,6 +217,7 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
     "local-rag-wiki.integration.json"
   );
   const marketplacePath = path.join(targetRoot, agentsDir, "plugins", "marketplace.json");
+  const dshMcpPath = path.join(targetRoot, ".dsh", "mcp.servers.yml");
   const hookScripts = [
     "session-start.js",
     "auto-recall.js",
@@ -229,6 +231,10 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   assert(fs.existsSync(hookManifestPath), "self-evolving hook manifest missing");
   assert(fs.existsSync(integrationManifestPath), "integration manifest missing");
   assert(fs.existsSync(marketplacePath), "plugin marketplace metadata missing");
+  assert(fs.existsSync(dshMcpPath), "DeepSeek Harness MCP configuration missing");
+  const dshMcp = fs.readFileSync(dshMcpPath, "utf8");
+  assert(dshMcp.includes("wiki-manager:"), "DSH wiki-manager entry missing");
+  assert(dshMcp.includes(`args: [\"${agentsDir}/run-wiki-manager.mcp.js\"]`), "DSH runner path is incorrect");
   for (const scriptName of hookScripts) {
     assert(
       fs.existsSync(path.join(targetRoot, agentsDir, "scripts", scriptName)),
@@ -297,6 +303,42 @@ function assertInstall(targetRoot, agentsDir, expectedPackageSource = null) {
   assert(codexConfig.includes("tool_timeout_sec = 120.0"), "Codex tool timeout is missing");
   const opencodeConfig = readJson(path.join(targetRoot, "opencode.jsonc"));
   assert(opencodeConfig.mcp["wiki-manager"].timeout === 75000, "OpenCode MCP timeout is missing");
+}
+
+function assertDshBundle() {
+  const manifest = readJson(path.join(ROOT, "package.json"));
+  assert(
+    manifest.dsh?.bundle?.patch === "./packages/dsh-local-rag-wiki/cordis.patch.yml",
+    "package.json does not expose the DSH bundle patch"
+  );
+  assert(
+    manifest.exports?.["./dsh"] === "./packages/dsh-local-rag-wiki/index.mjs",
+    "package.json does not export the DSH lifecycle plugin"
+  );
+  assert(
+    manifest.exports?.["./dsh-runner"] === "./packages/dsh-local-rag-wiki/workspace-runner.cjs",
+    "package.json does not export the DSH workspace runner"
+  );
+  assert(
+    manifest.files.includes("packages/dsh-local-rag-wiki/"),
+    "published package would omit the DSH bundle files"
+  );
+  const recallCoordinator = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "recall.mjs"), "utf8");
+  assert(recallCoordinator.includes("depth: 'abstract'"), "DSH recall coordinator does not request L0 abstracts");
+  assert(recallCoordinator.includes("depth: 'packet'"), "DSH recall coordinator does not request L1 packets");
+  assert(recallCoordinator.includes("inFlight"), "DSH recall coordinator lacks in-flight deduplication");
+  assert(recallCoordinator.includes("PACKET_WINDOW_MS"), "DSH recall coordinator lacks an L1 packet budget");
+  const patch = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "cordis.patch.yml"), "utf8");
+  assert(patch.includes("name: '@ihorleleka/wiki-kit/dsh'"), "DSH bundle does not mount the lifecycle plugin");
+  assert(patch.includes("name: '@deepseek-ai/dsh-mcp-client'"), "DSH bundle does not use the official MCP bridge");
+  assert(patch.includes("require.resolve('@ihorleleka/wiki-kit/dsh-runner')"), "DSH bundle does not resolve its workspace launcher");
+  const { findAgentsRoot } = require(path.join(DSH_BUNDLE_ROOT, "workspace-runner.cjs"));
+  const root = path.join(ARTIFACTS_ROOT, "dsh-bundle-marker-test");
+  prepareScratch(root);
+  const customAgentsRoot = path.join(root, "custom-wiki-kit");
+  fs.mkdirSync(customAgentsRoot, { recursive: true });
+  fs.writeFileSync(path.join(customAgentsRoot, ".wiki-kit-install.json"), "{}\n", "utf8");
+  assert(findAgentsRoot(root) === customAgentsRoot, "DSH runner did not discover custom wiki-kit installation");
 }
 
 function assertCompatibilityClassification() {
@@ -432,6 +474,7 @@ function assertLegacyAgentsPolicyMigrated(targetRoot) {
 }
 
 function main() {
+  assertDshBundle();
   assertCompatibilityClassification();
   assertReleaseWorkflowImageRepository();
   assertRepositoryUniqueResourceNames();
@@ -545,7 +588,7 @@ function main() {
   assertMergedInstall(mergeRoot, ".agents");
   const mergedStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", mergeRoot]);
   assert(
-    mergedStatus.stdout.includes("MCP configs: 4 current, 0 changed, 0 missing, 0 invalid"),
+    mergedStatus.stdout.includes("MCP configs: 5 current, 0 changed, 0 missing, 0 invalid"),
     "merged MCP configs with unrelated servers were not reported current"
   );
   assert(

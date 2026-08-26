@@ -778,7 +778,7 @@ function compareRootAssets(targetRoot, agentsDir) {
       result.current.push(portablePath);
     } else if (portablePath === ".codex/config.toml" && actual.includes(expected.trim())) {
       result.current.push(portablePath);
-    } else if ([".vscode/mcp.json", ".claude/settings.local.json", "opencode.jsonc"].includes(portablePath)) {
+    } else if ([".vscode/mcp.json", ".claude/settings.local.json", "opencode.jsonc", ".dsh/mcp.servers.yml"].includes(portablePath)) {
       const validation = validateMcpConfig(targetRoot, agentsDir, portablePath);
       (validation.state === "current" ? result.current : result.changed).push(portablePath);
     } else if (portablePath === ".vscode/settings.json") {
@@ -839,6 +839,15 @@ function codexWikiManagerEntry(content) {
   return { command, args };
 }
 
+function dshWikiManagerEntry(content) {
+  const server = content.match(/^\s{2}wiki-manager:\s*\r?\n((?:^\s{4,}.*(?:\r?\n|$))*)/m);
+  if (!server) return null;
+  const command = server[1].match(/^\s*command:\s*([^\s#]+)\s*(?:#.*)?$/m)?.[1];
+  const runner = server[1].match(/^\s*args:\s*\[\s*["']?([^\s\]"']+)["']?\s*\]\s*(?:#.*)?$/m)?.[1];
+  if (!command || !runner) return { malformed: true };
+  return { command, args: [runner] };
+}
+
 function validateMcpConfig(targetRoot, agentsDir, configFile) {
   const configPath = path.join(targetRoot, configFile);
   if (!fs.existsSync(configPath)) return { state: "missing", detail: "file missing", additions: 0 };
@@ -854,6 +863,15 @@ function validateMcpConfig(targetRoot, agentsDir, configFile) {
         .filter((name) => name !== "wiki-manager").length;
       if (entry?.malformed) {
         return { state: "invalid", detail: "wiki-manager TOML entry is malformed", additions };
+      }
+    } else if (configFile === ".dsh/mcp.servers.yml") {
+      const content = fs.readFileSync(configPath, "utf8");
+      entry = dshWikiManagerEntry(content);
+      additions = [...content.matchAll(/^\s{2}([^\s:#][^:#]*):\s*$/gm)]
+        .map((match) => match[1])
+        .filter((name) => name !== "wiki-manager").length;
+      if (entry?.malformed) {
+        return { state: "invalid", detail: "wiki-manager DSH YAML entry is malformed", additions };
       }
     } else {
       const config = readJsonConfig(configPath);
@@ -904,6 +922,7 @@ function checkMcpReferences(targetRoot, agentsDir) {
     ".vscode/mcp.json",
     "opencode.jsonc",
     ".codex/config.toml",
+    ".dsh/mcp.servers.yml",
   ];
   const result = {
     ok: [],
