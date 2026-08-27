@@ -37,8 +37,10 @@ Install the native DSH bundle once into the profile you use (usually `web`):
 dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
 ```
 
-Restart that DSH profile, open an installed repository as its workspace, and
-start a session. The bundle uses DSH's official `@deepseek-ai/dsh-mcp-client`
+After upgrading the bundle, run the repository's wiki-kit update command once
+so it installs the workspace-local DSH launcher, then restart that DSH profile,
+open the repository as its workspace, and start a session. The bundle uses
+DSH's official `@deepseek-ai/dsh-mcp-client`
 to find the wiki-kit installation marker (including a custom `--agents-dir`),
 launch the managed MCP runner, reconnect it, discover its tools, and register
 them as native `mcp__wiki-manager__*` tools. The runner starts or attaches to

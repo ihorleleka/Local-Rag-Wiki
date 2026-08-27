@@ -10,8 +10,8 @@
       config:
         serverName: wiki-manager
         transport: stdio
-        command: !!js process.execPath
-        args: [!!js require.resolve('@ihorleleka/wiki-kit/dsh-runner')]
+        command: node
+        args: [".dsh/run-wiki-manager.cjs"]
         cwd: !!js process.cwd()
         toolCallTimeoutMs: 120000
         failOnStartupError: false

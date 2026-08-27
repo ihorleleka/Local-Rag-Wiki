@@ -23,9 +23,11 @@ Local-Rag-Wiki supports two complementary DSH installation modes:
    searches; L1 packets are rate-limited and state writes are queued atomically.
 
 The profile bundle is global to its DSH profile but activates the runner using
-DSH's current workspace. It only works in repositories that have first received
-the Local-Rag-Wiki repository install. Restart the selected profile after
-adding or removing the bundle.
+DSH's current workspace. It invokes this repository's
+`.dsh/run-wiki-manager.cjs` launcher, so run the wiki-kit update command after
+upgrading to ensure that file is present. It only works in repositories that
+have first received the Local-Rag-Wiki repository install. Restart the selected
+profile after adding or removing the bundle.
 
 Do not activate both the workspace config and the profile bundle with the same
 `wiki-manager` namespace: both bridge the same server and DSH will reject the

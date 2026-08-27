@@ -334,7 +334,9 @@ function assertDshBundle() {
   const patch = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "cordis.patch.yml"), "utf8");
   assert(patch.includes("name: '@ihorleleka/wiki-kit/dsh'"), "DSH bundle does not mount the lifecycle plugin");
   assert(patch.includes("name: '@deepseek-ai/dsh-mcp-client'"), "DSH bundle does not use the official MCP bridge");
-  assert(patch.includes("require.resolve('@ihorleleka/wiki-kit/dsh-runner')"), "DSH bundle does not resolve its workspace launcher");
+  assert(patch.includes('args: [".dsh/run-wiki-manager.cjs"]'), "DSH bundle does not use the workspace-local launcher");
+  const dshLauncher = path.join(ROOT, "templates", "root", ".dsh", "run-wiki-manager.cjs");
+  assert(fs.existsSync(dshLauncher), "workspace-local DSH launcher is missing");
   const { findAgentsRoot } = require(path.join(DSH_BUNDLE_ROOT, "workspace-runner.cjs"));
   const root = path.join(ARTIFACTS_ROOT, "dsh-bundle-marker-test");
   prepareScratch(root);
