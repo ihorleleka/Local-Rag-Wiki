@@ -1,6 +1,6 @@
 {
   "name": "@ihorleleka/wiki-kit",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Installer and runner assets for wiki-manager agent wiki-kit integration.",
   "repository": {
     "type": "git",
