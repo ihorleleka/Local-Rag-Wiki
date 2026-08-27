@@ -41,8 +41,9 @@ Restart that DSH profile, open an installed repository as its workspace, and
 start a session. On `agent/created`, the bundle uses the agent's actual
 workspace (including a custom `--agents-dir`) to mount DSH's official
 `@deepseek-ai/dsh-mcp-client`, launch the managed MCP runner, reconnect it,
-discover its tools, and register native session-scoped
-`mcp__wiki-<session>__*` tools. The runner starts or attaches to that
+discover its tools, and register predictable
+`mcp__wiki-manager__*` tools. The client remains agent-scoped even though the
+namespace is stable. The runner starts or attaches to that
 repository's Docker service exactly as it does for the other harnesses.
 
 It also mounts a marker-gated Cordis recall coordinator for that workspace:

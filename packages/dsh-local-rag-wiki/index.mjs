@@ -7,16 +7,7 @@ import { retrieveWikiTiers, shouldRetrieve } from './recall.mjs'
 export const name = 'local-rag-wiki-lifecycle'
 
 function workspaceOf(agentOrSession) {
-  return agentOrSession?.session?.cwd || agentOrSession?.cwd
-}
-
-function scopedServerName(sessionId) {
-  let hash = 2166136261
-  for (const character of String(sessionId)) {
-    hash ^= character.charCodeAt(0)
-    hash = Math.imul(hash, 16777619)
-  }
-  return `wiki-${(hash >>> 0).toString(16)}`
+  return agentOrSession?.session?.header?.cwd || agentOrSession?.header?.cwd
 }
 
 function lifecycleMessage(text) {
@@ -70,6 +61,7 @@ function isPluginMessage(message) {
 /** Workspace-local lifecycle behavior; unrelated repositories are ignored. */
 export function apply(ctx) {
   const pendingCaptures = new Map()
+  const mcpReady = new Map()
   const persist = (workspace, mutate) => updateState(workspace, mutate).catch(error => {
     console.warn(`[local-rag-wiki] could not persist workspace memory: ${error.message}`)
     return undefined
@@ -80,20 +72,26 @@ export function apply(ctx) {
     const agentsRoot = findAgentsRoot(workspace)
     if (!workspace || !agentsRoot) return
     const handle = agent.ctx.plugin(mcpClient, {
-      serverName: scopedServerName(agent.session.id),
+      // The MCP client is mounted per agent context, so this stable namespace
+      // is safe and keeps model-facing names predictable across sessions.
+      serverName: 'wiki-manager',
       transport: 'stdio',
       command: process.execPath,
       args: [path.join(agentsRoot, 'run-wiki-manager.mcp.js')],
       cwd: workspace,
       toolCallTimeoutMs: 120000,
-      failOnStartupError: false,
+      failOnStartupError: true,
       reconnect: { enabled: true, initialDelayMs: 5000, maxAttempts: 5 },
     })
-    try {
-      await handle.await()
-    } catch (error) {
+    const ready = handle.await().catch(error => {
       console.warn(`[local-rag-wiki] could not mount wiki MCP tools: ${error.message}`)
-    }
+      return undefined
+    })
+    mcpReady.set(agent.id, ready)
+  })
+
+  ctx.on('agent/disposed', ({ agent }) => {
+    mcpReady.delete(agent.id)
   })
 
   ctx.on('agent/session-start', ({ agent }) => {

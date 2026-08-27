@@ -334,6 +334,7 @@ function assertDshBundle() {
   const lifecyclePlugin = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "index.mjs"), "utf8");
   assert(lifecyclePlugin.includes("agent.ctx.plugin(mcpClient"), "DSH bundle does not mount MCP per agent workspace");
   assert(lifecyclePlugin.includes("findAgentsRoot(workspace)"), "DSH bundle does not gate MCP tools to installed workspaces");
+  assert(lifecyclePlugin.includes("serverName: 'wiki-manager'"), "DSH bundle does not use the stable wiki-manager namespace");
   const patch = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "cordis.patch.yml"), "utf8");
   assert(patch.includes("name: '@ihorleleka/wiki-kit/dsh'"), "DSH bundle does not mount the lifecycle plugin");
   assert(!patch.includes("@deepseek-ai/dsh-mcp-client"), "DSH bundle must not mount MCP globally outside an agent workspace");

@@ -16,9 +16,10 @@ Local-Rag-Wiki supports two complementary DSH installation modes:
    workspace contains a Local-Rag-Wiki install marker, it mounts DSH's official
    `@deepseek-ai/dsh-mcp-client` in that agent scope, using the workspace's
    managed runner. This supports custom `--agents-dir` names, reconnects after
-   transport loss, discovers MCP tools, and exposes session-scoped native
-   `mcp__wiki-<session>__*` tools. It also applies repository-local recall:
-   local state first, then bounded `wiki_search` L0 abstract scans and L1 packet
+   transport loss, discovers MCP tools, and exposes predictable
+   `mcp__wiki-manager__*` tools. The client remains agent-scoped even though
+   its namespace is stable. It also applies repository-local recall: local
+   state first, then bounded `wiki_search` L0 abstract scans and L1 packet
    retrieval for material prompts. Full L2 `wiki_read` remains model-directed.
 
 The profile bundle is global to its DSH profile, but it does not start a wiki
