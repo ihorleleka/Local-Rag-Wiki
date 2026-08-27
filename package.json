@@ -1,6 +1,6 @@
 {
   "name": "@ihorleleka/wiki-kit",
-  "version": "0.0.0",
+  "version": "0.1.2",
   "description": "Installer and runner assets for wiki-manager agent wiki-kit integration.",
   "repository": {
     "type": "git",
@@ -9,7 +9,9 @@
   "bin": {
     "wiki-kit": "bin/wiki-kit.js"
   },
+  "main": "./packages/dsh-local-rag-wiki/index.mjs",
   "exports": {
+    ".": "./packages/dsh-local-rag-wiki/index.mjs",
     "./dsh": "./packages/dsh-local-rag-wiki/index.mjs",
     "./dsh-runner": "./packages/dsh-local-rag-wiki/workspace-runner.cjs",
     "./dsh.bundle.patch": "./packages/dsh-local-rag-wiki/cordis.patch.yml",

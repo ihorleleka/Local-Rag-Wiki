@@ -32,9 +32,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Apply tag version to wiki-kit package
-        run: npm pkg set version="${{ needs.resolve-version.outputs.version }}"
-      - name: Verify wiki-kit release package metadata
+      - name: Verify committed wiki-kit release package metadata
         run: |
           test "$(node -p "require('./package.json').version")" = "${{ needs.resolve-version.outputs.version }}"
           npm pack --dry-run

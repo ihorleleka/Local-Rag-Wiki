@@ -11,6 +11,7 @@ const CUSTOM_SMOKE_ROOT = path.join(ARTIFACTS_ROOT, "verify-smoke-custom");
 const DEFAULT_PACKAGE_SOURCE = "github:ihorleleka/Local-Rag-Wiki";
 const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 const DSH_BUNDLE_ROOT = path.join(ROOT, "packages", "dsh-local-rag-wiki");
+const PACKAGE_METADATA = require(path.join(ROOT, "package.json"));
 const {
   DEFAULT_IMAGE,
   COMPATIBILITY,
@@ -311,6 +312,8 @@ function assertDshBundle() {
     manifest.dsh?.bundle?.patch === "./packages/dsh-local-rag-wiki/cordis.patch.yml",
     "package.json does not expose the DSH bundle patch"
   );
+  assert(manifest.main === "./packages/dsh-local-rag-wiki/index.mjs", "package.json does not declare the DSH entry artifact");
+  assert(manifest.exports?.["."] === "./packages/dsh-local-rag-wiki/index.mjs", "package.json does not export the DSH entry artifact");
   assert(
     manifest.exports?.["./dsh"] === "./packages/dsh-local-rag-wiki/index.mjs",
     "package.json does not export the DSH lifecycle plugin"
@@ -474,6 +477,10 @@ function assertLegacyAgentsPolicyMigrated(targetRoot) {
 }
 
 function main() {
+  assert(
+    PACKAGE_METADATA.version === COMPATIBILITY.wikiKitVersion,
+    "package.json version must match the shared wiki-kit/service release version"
+  );
   assertDshBundle();
   assertCompatibilityClassification();
   assertReleaseWorkflowImageRepository();
