@@ -1,11 +1,22 @@
+import path from 'node:path'
+import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { captureAssistantSummary, capturePrompt, keywords, readState, relevantRecent, textFrom, topHints, trimState, updateState } from './state.mjs'
+import { captureAssistantSummary, capturePrompt, findAgentsRoot, keywords, readState, relevantRecent, textFrom, topHints, trimState, updateState } from './state.mjs'
 import { retrieveWikiTiers, shouldRetrieve } from './recall.mjs'
 
 export const name = 'local-rag-wiki-lifecycle'
 
 function workspaceOf(agentOrSession) {
   return agentOrSession?.session?.cwd || agentOrSession?.cwd
+}
+
+function scopedServerName(sessionId) {
+  let hash = 2166136261
+  for (const character of String(sessionId)) {
+    hash ^= character.charCodeAt(0)
+    hash = Math.imul(hash, 16777619)
+  }
+  return `wiki-${(hash >>> 0).toString(16)}`
 }
 
 function lifecycleMessage(text) {
@@ -62,6 +73,27 @@ export function apply(ctx) {
   const persist = (workspace, mutate) => updateState(workspace, mutate).catch(error => {
     console.warn(`[local-rag-wiki] could not persist workspace memory: ${error.message}`)
     return undefined
+  })
+
+  ctx.on('agent/created', async ({ agent }) => {
+    const workspace = workspaceOf(agent)
+    const agentsRoot = findAgentsRoot(workspace)
+    if (!workspace || !agentsRoot) return
+    const handle = agent.ctx.plugin(mcpClient, {
+      serverName: scopedServerName(agent.session.id),
+      transport: 'stdio',
+      command: process.execPath,
+      args: [path.join(agentsRoot, 'run-wiki-manager.mcp.js')],
+      cwd: workspace,
+      toolCallTimeoutMs: 120000,
+      failOnStartupError: false,
+      reconnect: { enabled: true, initialDelayMs: 5000, maxAttempts: 5 },
+    })
+    try {
+      await handle.await()
+    } catch (error) {
+      console.warn(`[local-rag-wiki] could not mount wiki MCP tools: ${error.message}`)
+    }
   })
 
   ctx.on('agent/session-start', ({ agent }) => {

@@ -37,14 +37,13 @@ Install the native DSH bundle once into the profile you use (usually `web`):
 dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
 ```
 
-After upgrading the bundle, run the repository's wiki-kit update command once
-so it installs the workspace-local DSH launcher, then restart that DSH profile,
-open the repository as its workspace, and start a session. The bundle uses
-DSH's official `@deepseek-ai/dsh-mcp-client`
-to find the wiki-kit installation marker (including a custom `--agents-dir`),
-launch the managed MCP runner, reconnect it, discover its tools, and register
-them as native `mcp__wiki-manager__*` tools. The runner starts or attaches to
-the repository's Docker service exactly as it does for the other harnesses.
+Restart that DSH profile, open an installed repository as its workspace, and
+start a session. On `agent/created`, the bundle uses the agent's actual
+workspace (including a custom `--agents-dir`) to mount DSH's official
+`@deepseek-ai/dsh-mcp-client`, launch the managed MCP runner, reconnect it,
+discover its tools, and register native session-scoped
+`mcp__wiki-<session>__*` tools. The runner starts or attaches to that
+repository's Docker service exactly as it does for the other harnesses.
 
 It also mounts a marker-gated Cordis recall coordinator for that workspace:
 `agent/session-start` seeds recurring-topic hints; `agent/pre-step` uses local
@@ -58,8 +57,8 @@ in-flight deduplicated; L1 packets are rate-limited, cold starts have a bounded
 state or wiki process is used outside a repository with a wiki-kit install marker.
 
 The generated `.dsh/mcp.servers.yml` remains a workspace-config alternative;
-do not activate both bridges with the same `wiki-manager` namespace or DSH will
-rightly reject the duplicate tool registration. `AGENTS.md` remains the
+prefer the profile bundle rather than running both bridges, which would create
+two MCP connections to the same repository service. `AGENTS.md` remains the
 portable policy layer.
 
 The `.agents/hooks/` and `.claude/settings.local.json` hooks are Claude

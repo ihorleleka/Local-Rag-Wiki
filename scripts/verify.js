@@ -331,12 +331,12 @@ function assertDshBundle() {
   assert(recallCoordinator.includes("depth: 'packet'"), "DSH recall coordinator does not request L1 packets");
   assert(recallCoordinator.includes("inFlight"), "DSH recall coordinator lacks in-flight deduplication");
   assert(recallCoordinator.includes("PACKET_WINDOW_MS"), "DSH recall coordinator lacks an L1 packet budget");
+  const lifecyclePlugin = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "index.mjs"), "utf8");
+  assert(lifecyclePlugin.includes("agent.ctx.plugin(mcpClient"), "DSH bundle does not mount MCP per agent workspace");
+  assert(lifecyclePlugin.includes("findAgentsRoot(workspace)"), "DSH bundle does not gate MCP tools to installed workspaces");
   const patch = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "cordis.patch.yml"), "utf8");
   assert(patch.includes("name: '@ihorleleka/wiki-kit/dsh'"), "DSH bundle does not mount the lifecycle plugin");
-  assert(patch.includes("name: '@deepseek-ai/dsh-mcp-client'"), "DSH bundle does not use the official MCP bridge");
-  assert(patch.includes('args: [".dsh/run-wiki-manager.cjs"]'), "DSH bundle does not use the workspace-local launcher");
-  const dshLauncher = path.join(ROOT, "templates", "root", ".dsh", "run-wiki-manager.cjs");
-  assert(fs.existsSync(dshLauncher), "workspace-local DSH launcher is missing");
+  assert(!patch.includes("@deepseek-ai/dsh-mcp-client"), "DSH bundle must not mount MCP globally outside an agent workspace");
   const { findAgentsRoot } = require(path.join(DSH_BUNDLE_ROOT, "workspace-runner.cjs"));
   const root = path.join(ARTIFACTS_ROOT, "dsh-bundle-marker-test");
   prepareScratch(root);
