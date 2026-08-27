@@ -249,6 +249,22 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   }
 }
 
+function assertDshBundleSource() {
+  const source = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "index.mjs"), "utf8");
+  assert(
+    source.includes("|| agentOrSession?.session?.cwd") && source.includes("|| agentOrSession?.cwd"),
+    "DSH bundle does not retain legacy workspace cwd compatibility"
+  );
+  const guard = `if (!workspace) return
+    const agentsRoot = findAgentsRoot(workspace)`;
+  assert(source.includes(guard), "DSH bundle can call findAgentsRoot before validating workspace");
+  assert(source.includes("ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))"), "DSH bundle does not mount on agent creation");
+  assert(source.includes(`ctx.on('agent/session-start', ({ agent }) => {
+    mountWikiMcp(agent)`), "DSH bundle does not retry mounting at session start");
+  assert(source.includes("if (mcpReady.has(agent.id)) return"), "DSH bundle does not deduplicate lifecycle mounts");
+  run(process.execPath, ["--check", path.join(DSH_BUNDLE_ROOT, "index.mjs")]);
+}
+
 function assertRepositoryUniqueResourceNames() {
   const runnerPath = path.join(
     ROOT,
@@ -485,6 +501,7 @@ function main() {
     "package.json version must match the shared wiki-kit/service release version"
   );
   assertDshBundle();
+  assertDshBundleSource();
   assertCompatibilityClassification();
   assertReleaseWorkflowImageRepository();
   assertRepositoryUniqueResourceNames();

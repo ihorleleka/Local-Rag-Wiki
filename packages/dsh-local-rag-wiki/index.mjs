@@ -7,7 +7,10 @@ import { retrieveWikiTiers, shouldRetrieve } from './recall.mjs'
 export const name = 'local-rag-wiki-lifecycle'
 
 function workspaceOf(agentOrSession) {
-  return agentOrSession?.session?.header?.cwd || agentOrSession?.header?.cwd
+  return agentOrSession?.session?.header?.cwd
+    || agentOrSession?.session?.cwd
+    || agentOrSession?.header?.cwd
+    || agentOrSession?.cwd
 }
 
 function lifecycleMessage(text) {
@@ -67,10 +70,12 @@ export function apply(ctx) {
     return undefined
   })
 
-  ctx.on('agent/created', async ({ agent }) => {
+  const mountWikiMcp = agent => {
+    if (mcpReady.has(agent.id)) return
     const workspace = workspaceOf(agent)
+    if (!workspace) return
     const agentsRoot = findAgentsRoot(workspace)
-    if (!workspace || !agentsRoot) return
+    if (!agentsRoot) return
     const handle = agent.ctx.plugin(mcpClient, {
       // The MCP client is mounted per agent context, so this stable namespace
       // is safe and keeps model-facing names predictable across sessions.
@@ -88,13 +93,19 @@ export function apply(ctx) {
       return undefined
     })
     mcpReady.set(agent.id, ready)
-  })
+  }
+
+  // agent/created normally has the session cwd, but session-start is the
+  // supported startup-driving edge and also covers hosts that populate cwd
+  // between the two lifecycle notifications.
+  ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))
 
   ctx.on('agent/disposed', ({ agent }) => {
     mcpReady.delete(agent.id)
   })
 
   ctx.on('agent/session-start', ({ agent }) => {
+    mountWikiMcp(agent)
     const context = startupContext(workspaceOf(agent))
     if (context) agent.inject(lifecycleMessage(context))
   })
