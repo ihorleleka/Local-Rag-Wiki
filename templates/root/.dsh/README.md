@@ -33,5 +33,8 @@ start a duplicate connection.
 
 Automatic L0/L1 recall calls the already-registered `wiki_search` tool through
 DSH's tool registry; it never launches a second runner or captures local prompt
-history. DSH lifecycle and tool registration stay in Cordis plugins and the
-official DSH tool registry.
+history. Recall runs at most once per turn and only from a direct user message;
+tool outputs and later model steps cannot trigger it. The injected retrieval is
+turn-scoped and replaced by an expiry marker when the turn stops, preventing
+retrieved payloads from accumulating or applying to later turns. DSH lifecycle
+and tool registration stay in Cordis plugins and the official DSH tool registry.

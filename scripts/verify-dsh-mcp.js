@@ -93,11 +93,13 @@ async function assertScopedBridge() {
 }
 
 async function assertLifecycleIntegration() {
-  const [{ Context }, { default: toolsPlugin }, { default: systemPromptPlugin }, { createScope }, lifecycle] = await Promise.all([
+  const [{ Context }, { default: toolsPlugin }, { default: systemPromptPlugin }, { createScope }, { Session }, { createUserMessage }, lifecycle] = await Promise.all([
     import('@deepseek-ai/cordis'),
     import('@deepseek-ai/dsh-tools'),
     import('@deepseek-ai/dsh-system-prompt'),
     import('@deepseek-ai/dsh-scope'),
+    import('@deepseek-ai/dsh-session'),
+    import('@deepseek-ai/dsh-llm'),
     import(pathToFileURL(path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'index.mjs')).href),
   ])
   const workspace = path.join(SCRATCH, 'lifecycle-integration')
@@ -116,24 +118,71 @@ async function assertLifecycleIntegration() {
   await ctx.plugin(toolsPlugin, { mode: 'native' }).await()
   await ctx.plugin(lifecycle).await()
   const tools = ctx.get('tools')
-  const agent = { id: 'lifecycle-agent', session: { id: 'lifecycle-agent', header: { cwd: workspace } } }
+  const session = Session.create('lifecycle-agent', undefined, {
+    version: 0,
+    id: 'lifecycle-agent',
+    createdAt: Date.now(),
+    cwd: workspace,
+  })
+  const agent = { id: 'lifecycle-agent', session }
   const scope = createScope(ctx, agent)
   agent.ctx = scope.ctx
 
   try {
     await ctx.parallel('agent/created', { agent })
     assert.deepEqual(tools.schemas(agent).map(tool => tool.name), ['mcp__wiki-manager__wiki_search'])
-    const messages = [{
-      role: 'user',
-      content: [{ type: 'text', text: 'Explain the project architecture and component rendering behavior in detail' }],
-    }]
+    const prompt = 'Explain the project architecture and component rendering behavior in detail'
+    const messages = [
+      createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }),
+      createUserMessage({ content: [{ type: 'text', text: 'tool output must not become the recall query' }], source: { kind: 'tool', callId: 'prior-tool' } }),
+    ]
     const decision = await ctx.waterfall(
       'agent/pre-step',
       { agent, messages, turn: 1, step: 1, signal: new AbortController().signal },
-      async () => ({ messages }),
+      async () => ({ kind: 'enter', messages }),
     )
-    assert.equal(decision.messages.length, 2)
-    assert.match(decision.messages[1].content[0].text, /Lifecycle MCP verification result/)
+    assert.equal(decision.messages.length, 3)
+    assert.match(decision.messages[2].content[0].text, /Lifecycle MCP verification result/)
+    assert.match(decision.messages[2].content[0].text, new RegExp(prompt))
+    assert.doesNotMatch(decision.messages[2].content[0].text, /tool output must not become the recall query/)
+
+    const repeated = await ctx.waterfall(
+      'agent/pre-step',
+      { agent, messages: [messages[0]], turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [messages[0]] }),
+    )
+    assert.equal(repeated.messages.length, 1, 'one turn must not run or inject recall twice')
+
+    const toolStep = [createUserMessage({
+      content: [{ type: 'text', text: 'A long compiler or file-read tool result with many searchable keywords' }],
+      source: { kind: 'tool', callId: 'tool-step' },
+    })]
+    const continuation = await ctx.waterfall(
+      'agent/pre-step',
+      { agent, messages: toolStep, turn: 1, step: 2, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: toolStep }),
+    )
+    assert.equal(continuation.messages.length, 1, 'tool-loop steps must not trigger recall')
+
+    for (const message of decision.messages) session.append('user/message', message, { surfaceOp: 'append' })
+    assert.match(session.deriveMessages().at(-1).content[0].text, /Lifecycle MCP verification result/)
+    await ctx.serial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
+    const visibleRecall = session.deriveMessages().filter(message => message.source?.plugin === 'local-rag-wiki-lifecycle')
+    assert.equal(visibleRecall.length, 1, 'recall projection must occupy one visible surface slot')
+    assert.match(visibleRecall[0].content[0].text, /state="expired"/)
+    assert.doesNotMatch(visibleRecall[0].content[0].text, /Lifecycle MCP verification result/)
+
+    const nextPrompt = createUserMessage({
+      content: [{ type: 'text', text: 'Review the deployment architecture and service boundaries' }],
+      source: { kind: 'user' },
+    })
+    const nextTurn = await ctx.waterfall(
+      'agent/pre-step',
+      { agent, messages: [nextPrompt], turn: 2, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: [nextPrompt] }),
+    )
+    assert.equal(nextTurn.messages.length, 2, 'a new direct-user turn may retrieve once')
+    assert.match(nextTurn.messages[1].content[0].text, /Lifecycle MCP verification result/)
   } finally {
     await scope.dispose()
   }

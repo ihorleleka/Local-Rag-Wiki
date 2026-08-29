@@ -55,12 +55,16 @@ legacy `dsh/mcp.servers.yml` is accepted only when the canonical file is absent.
 DSH core does not auto-load this file—the trusted profile bundle is its loader.
 Do not add a second global MCP client for the same server.
 
-The bundle also performs bounded wiki recall for material prompts. After the
-scoped bridge is ready, `agent/pre-step` dispatches `wiki_search` through DSH's
-existing tool registry—first `depth="abstract"` (L0), then matching
-`depth="packet"` context (L1). It does not spawn a second runner. Recall is
-per-workspace cached and in-flight deduplicated, L1 packets are rate-limited,
-and full L2 `wiki_read` remains model-directed.
+The bundle also performs bounded wiki recall once per turn for a material,
+direct user prompt. Tool results, plugin context, delegated control messages,
+and later tool-loop steps do not trigger recall. After the scoped bridge is
+ready, `agent/pre-step` dispatches `wiki_search` through DSH's existing tool
+registry—first `depth="abstract"` (L0), then matching `depth="packet"` context
+(L1). It does not spawn a second runner. Recall is per-workspace cached and
+in-flight deduplicated, L1 packets are rate-limited, and full L2 `wiki_read`
+remains model-directed. Injected recall is turn-scoped; when the turn stops,
+its payload is replaced by a small expiry marker so it cannot accumulate or
+silently govern later turns.
 
 The governed wiki and its MCP search are the only DSH memory path; the bundle
 does not capture local prompt history. Claude Code connects to the same runner

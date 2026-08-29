@@ -14,11 +14,52 @@ function workspaceOf(agentOrSession) {
     || agentOrSession?.cwd
 }
 
-function lifecycleMessage(text) {
+function lifecycleMessage(text, turn, state = 'active') {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: name },
+    source: { kind: 'plugin', plugin: name, form: 'wiki-recall', state, turn },
   })
+}
+
+function directUserPrompt(messages) {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.source?.kind !== 'user') continue
+    const text = textFrom(message).trim()
+    if (text) return text
+  }
+  return undefined
+}
+
+function activeRecallEvent(agent, turn) {
+  const session = agent?.session
+  if (!session?.events || !session?.surface?.nodes) return undefined
+  const visible = new Set(session.surface.nodes)
+  for (const event of [...session.events].reverse()) {
+    const source = event?.data?.source
+    if (event?.type !== 'user/message' || !visible.has(event.seq)) continue
+    if (source?.kind !== 'plugin' || source.plugin !== name || source.form !== 'wiki-recall' || source.state !== 'active') continue
+    if (turn === undefined || source.turn === turn) return event
+  }
+  return undefined
+}
+
+function expireWikiContext(agent, turn) {
+  const event = activeRecallEvent(agent, turn)
+  if (!event || typeof agent.session.append !== 'function') return false
+  agent.session.append(
+    'user/message',
+    lifecycleMessage(
+      '<wiki-kit-context source="dsh-local-rag-wiki" state="expired">Automatic wiki recall is turn-scoped; no recalled context is active.</wiki-kit-context>',
+      event.data.source.turn,
+      'expired',
+    ),
+    {
+      surfaceOp: { op: 'replace', start: event.seq, end: event.seq },
+      sourceEventSeqs: [event.seq],
+    },
+  )
+  return true
 }
 
 function wikiContext(retrieval) {
@@ -66,6 +107,7 @@ async function executeWikiSearch(agent, payload, arguments_) {
 export function apply(ctx) {
   const mcpReady = new Map()
   const mcpMounts = new Map()
+  const recalledTurns = new Map()
 
   const mountWikiMcp = agent => {
     const existing = mcpReady.get(agent.id)
@@ -118,6 +160,13 @@ export function apply(ctx) {
     // event; these maps only release coordinator references.
     mcpReady.delete(agent.id)
     mcpMounts.delete(agent.id)
+    recalledTurns.delete(agent.id)
+  })
+
+  ctx.on('agent/turn-stopping', ({ agent, turn }) => {
+    // Recall is request context, not durable conversation history. Replace the
+    // active payload with a tiny expiry marker once the turn has finished.
+    expireWikiContext(agent, turn)
   })
 
   ctx.on('agent/pre-step', async (payload, next) => {
@@ -126,10 +175,17 @@ export function apply(ctx) {
     const ready = mountWikiMcp(payload.agent)
     if (ready) await ready
     const decision = await next()
-    const workspace = workspaceOf(payload.agent)
-    const prompt = payload.messages.filter(message => !isPluginMessage(message)).map(textFrom).filter(Boolean).join('\n')
-    if (!workspace || !prompt || !shouldRetrieve(prompt, keywords(prompt).length)) return decision
+    if (decision.kind === 'reject' || payload.step !== 1) return decision
 
+    const prompt = directUserPrompt(payload.messages)
+    const workspace = workspaceOf(payload.agent)
+    if (!workspace || !prompt || recalledTurns.get(payload.agent.id) === payload.turn) return decision
+    if (!shouldRetrieve(prompt, keywords(prompt).length)) return decision
+
+    // Clean up an active snapshot left by an aborted/error turn before starting
+    // another retrieval. Mark before I/O so one turn never retries recall.
+    expireWikiContext(payload.agent)
+    recalledTurns.set(payload.agent.id, payload.turn)
     const retrieval = await retrieveWikiTiers(
       workspace,
       prompt,
@@ -138,6 +194,12 @@ export function apply(ctx) {
     )
     const context = wikiContext(retrieval)
     if (!context) return decision
-    return { ...decision, messages: [...decision.messages, lifecycleMessage(context)] }
+    return {
+      ...decision,
+      messages: [
+        ...decision.messages.filter(message => !isPluginMessage(message)),
+        lifecycleMessage(context, payload.turn),
+      ],
+    }
   })
 }
