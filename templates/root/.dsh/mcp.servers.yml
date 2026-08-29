@@ -3,6 +3,8 @@ servers:
     transport: stdio
     command: node
     args: [".agents/run-wiki-manager.mcp.js"]
+    toolCallTimeoutMs: 120000
+    failOnStartupError: true
     reconnect:
       enabled: true
       initialDelayMs: 5000

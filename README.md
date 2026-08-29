@@ -22,12 +22,12 @@ npx github:ihorleleka/Local-Rag-Wiki install .
 ```
 
 This scaffolds the managed `.agents/` runner, the `AGENTS.md` policy section,
-MCP config for DeepSeek Harness (`.dsh/mcp.servers.yml`), Claude Code, Codex,
-VS Code, and OpenCode, plus a `wiki/` folder. These integrations are additive:
-installing DSH support does not remove or replace the other harness configs.
-The MCP service then starts automatically per repository when your agent client
-connects. Pre-pulling the image (above) is recommended before running the agent
-in a fresh environment.
+DSH workspace assets (`.dsh/mcp.servers.yml` and its scoped MCP bridge), Claude
+Code, Codex, VS Code, and OpenCode, plus a `wiki/` folder. The DSH bridge stays
+under `.dsh/`; it is never installed as a repository-root
+`.dsh-mcp-client.js`. These integrations are additive. The MCP service starts
+per repository when a configured agent client connects. Pre-pulling the image
+(above) is recommended before running the agent in a fresh environment.
 
 ## DeepSeek Harness
 
@@ -38,35 +38,34 @@ dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
 ```
 
 Restart that DSH profile, open an installed repository as its workspace, and
-start a session. On `agent/created`, the bundle uses the agent's actual
-workspace (including a custom `--agents-dir`) to mount DSH's official
-`@deepseek-ai/dsh-mcp-client`, launch the managed MCP runner, reconnect it,
-discover its tools, and register predictable
-`mcp__wiki-manager__*` tools. The client remains agent-scoped even though the
-namespace is stable. The runner starts or attaches to that
-repository's Docker service exactly as it does for the other harnesses.
+start a session. On DSH's native `agent/created` / `agent/session-start`
+lifecycle, the bundle reads the active workspace's `.dsh/mcp.servers.yml`,
+validates its `wiki-manager` entry against the managed install marker, resolves
+the configured `node` executable through DSH's subprocess service, and mounts
+the bridge through `agent.ctx`. It never uses `process.execPath`, because that
+is the Electron executable in DSH Desktop. Initial discovery finishes before
+the model request is assembled, exposing stable native
+`mcp__wiki-manager__*` tools on that agent's tool scope. Identical namespaces
+can coexist in different agent scopes without leaking tools between sessions.
 
-It also mounts a marker-gated Cordis recall coordinator for that workspace:
-`agent/session-start` seeds recurring-topic hints; `agent/pre-step` uses local
-state, then performs bounded wiki retrieval only for a material prompt—first
-`wiki_search depth="abstract"` (L0), then matching `depth="packet"` context
-(L1). It labels the evidence and leaves full L2 `wiki_read` decisions to the
-model. `session/event` records an assistant summary, while `agent/turn-stopping`
-and `session/flush` trim and persist state. Recall is per-workspace cached and
-in-flight deduplicated; L1 packets are rate-limited, cold starts have a bounded
-90-second allowance, and state updates are queued with atomic replacement. No
-state or wiki process is used outside a repository with a wiki-kit install marker.
+The scoped bridge source is delivered as `.dsh/.dsh-mcp-client.js` (never at
+repository root) and follows DSH's MCP transport, reconnect, tool-schema, and
+execution pipeline. The canonical config path is `.dsh/mcp.servers.yml`; a
+legacy `dsh/mcp.servers.yml` is accepted only when the canonical file is absent.
+DSH core does not auto-load this file—the trusted profile bundle is its loader.
+Do not add a second global MCP client for the same server.
 
-The generated `.dsh/mcp.servers.yml` remains a workspace-config alternative;
-prefer the profile bundle rather than running both bridges, which would create
-two MCP connections to the same repository service. `AGENTS.md` remains the
-portable policy layer.
+The bundle also performs bounded wiki recall for material prompts. After the
+scoped bridge is ready, `agent/pre-step` dispatches `wiki_search` through DSH's
+existing tool registry—first `depth="abstract"` (L0), then matching
+`depth="packet"` context (L1). It does not spawn a second runner. Recall is
+per-workspace cached and in-flight deduplicated, L1 packets are rate-limited,
+and full L2 `wiki_read` remains model-directed.
 
-The `.agents/hooks/` and `.claude/settings.local.json` hooks are Claude
-Code-specific. DSH lifecycle interception belongs in trusted Host/Profile
-Cordis plugins, not a project-local hook manifest. See
-[`.dsh/README.md`](./templates/root/.dsh/README.md) for the workspace-config
-boundary.
+The governed wiki and its MCP search are the only DSH memory path; the bundle
+does not capture local prompt history. Claude Code connects to the same runner
+through its MCP configuration without repository prompt-history hooks. See
+[`.dsh/README.md`](./templates/root/.dsh/README.md) for the workspace boundary.
 
 ## Update
 

@@ -22,10 +22,9 @@ The update preserves user-added skill directories under `skills/`, replaces the
 managed `skills/wiki` skill, and removes old split wiki-kit skills from earlier
 versions.
 
-Self-evolving hooks are managed and enabled by default through
-`../.claude/settings.local.json`, with hook scripts in `scripts/` and a portable
-manifest at `hooks/hooks.json`. The install also includes integration metadata in
-`integrations/` and plugin catalog metadata in `plugins/`.
+The install includes integration metadata in `integrations/` and plugin catalog
+metadata in `plugins/`. Project recall is provided by the governed wiki MCP
+service rather than local prompt-history hooks.
 
 Repository `AGENTS.md` instructions and editor MCP configuration are merged by
 default. The update owns only the managed wiki policy section and the

@@ -91,25 +91,6 @@ function runNpm(args) {
   return run(NPM, args, options);
 }
 
-function assertHookScriptProducesJson(targetRoot, agentsDir, scriptName, inputPayload) {
-  const scriptPath = path.join(targetRoot, agentsDir, "scripts", scriptName);
-  const result = spawnSync(process.execPath, [scriptPath], {
-    cwd: targetRoot,
-    encoding: "utf8",
-    input: `${JSON.stringify(inputPayload || {})}\n`,
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-  });
-  assert(result.status === 0, `${scriptName} exited with ${result.status}`);
-  const raw = (result.stdout || "").trim();
-  assert(raw.length > 0, `${scriptName} did not emit JSON output`);
-  try {
-    JSON.parse(raw);
-  } catch (error) {
-    fail(`${scriptName} emitted invalid JSON: ${error.message}`);
-  }
-}
-
 function prepareScratch(dir) {
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
@@ -210,7 +191,6 @@ function assertReferencedJsTargetsExist(targetRoot, agentsDir) {
 function assertDeliveredSurface(targetRoot, agentsDir) {
   const consumerAgentsPath = path.join(targetRoot, "AGENTS.md");
   const wikiSkillPath = path.join(targetRoot, agentsDir, "skills", "wiki", "SKILL.md");
-  const hookManifestPath = path.join(targetRoot, agentsDir, "hooks", "hooks.json");
   const integrationManifestPath = path.join(
     targetRoot,
     agentsDir,
@@ -219,34 +199,20 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   );
   const marketplacePath = path.join(targetRoot, agentsDir, "plugins", "marketplace.json");
   const dshMcpPath = path.join(targetRoot, ".dsh", "mcp.servers.yml");
-  const hookScripts = [
-    "session-start.js",
-    "auto-recall.js",
-    "auto-capture.js",
-    "pre-compact.js",
-    "session-end.js",
-    "skill-experience.js",
-  ];
+  const dshMcpClientPath = path.join(targetRoot, ".dsh", ".dsh-mcp-client.js");
+  const dshModulePath = path.join(targetRoot, ".dsh", "package.json");
   assert(fs.existsSync(consumerAgentsPath), "consumer AGENTS.md missing");
   assert(fs.existsSync(wikiSkillPath), "managed wiki skill missing");
-  assert(fs.existsSync(hookManifestPath), "self-evolving hook manifest missing");
   assert(fs.existsSync(integrationManifestPath), "integration manifest missing");
   assert(fs.existsSync(marketplacePath), "plugin marketplace metadata missing");
   assert(fs.existsSync(dshMcpPath), "DeepSeek Harness MCP configuration missing");
+  assert(fs.existsSync(dshMcpClientPath), "agent-scoped DSH MCP client missing from .dsh");
+  assert(!fs.existsSync(path.join(targetRoot, ".dsh-mcp-client.js")), "DSH MCP client leaked into repository root");
+  assert(readJson(dshModulePath).type === "module", ".dsh MCP client is not in an ESM package scope");
   const dshMcp = fs.readFileSync(dshMcpPath, "utf8");
   assert(dshMcp.includes("wiki-manager:"), "DSH wiki-manager entry missing");
   assert(dshMcp.includes(`args: [\"${agentsDir}/run-wiki-manager.mcp.js\"]`), "DSH runner path is incorrect");
-  for (const scriptName of hookScripts) {
-    assert(
-      fs.existsSync(path.join(targetRoot, agentsDir, "scripts", scriptName)),
-      `self-evolving hook script missing: ${scriptName}`
-    );
-  }
-  const claudeConfig = readJson(path.join(targetRoot, ".claude", "settings.local.json"));
-  const managedHooks = claudeConfig.hooks || {};
-  for (const hookName of ["SessionStart", "UserPromptSubmit", "Stop", "PreCompact", "SessionEnd", "PostToolUse"]) {
-    assert(Array.isArray(managedHooks[hookName]), `managed Claude hook missing: ${hookName}`);
-  }
+
 }
 
 function assertDshBundleSource() {
@@ -255,14 +221,20 @@ function assertDshBundleSource() {
     source.includes("|| agentOrSession?.session?.cwd") && source.includes("|| agentOrSession?.cwd"),
     "DSH bundle does not retain legacy workspace cwd compatibility"
   );
-  const guard = `if (!workspace) return
-    const agentsRoot = findAgentsRoot(workspace)`;
-  assert(source.includes(guard), "DSH bundle can call findAgentsRoot before validating workspace");
+  assert(source.includes("loadWorkspaceWikiMcp(workspace)"), "DSH bundle does not load workspace mcp.servers.yml");
+  assert(source.includes("agent.ctx.plugin(mcpClient"), "DSH bundle does not mount MCP through the agent scope");
+  assert(source.includes("subprocess.resolveExecutable(discovered.server.command"), "DSH bundle does not resolve the configured Node executable through DSH");
+  assert(!source.includes("process.execPath"), "DSH bundle would launch the runner through Electron process.execPath");
   assert(source.includes("ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))"), "DSH bundle does not mount on agent creation");
-  assert(source.includes(`ctx.on('agent/session-start', ({ agent }) => {
-    mountWikiMcp(agent)`), "DSH bundle does not retry mounting at session start");
-  assert(source.includes("if (mcpReady.has(agent.id)) return"), "DSH bundle does not deduplicate lifecycle mounts");
+  assert(source.includes("ctx.on('agent/session-start', ({ agent }) => mountWikiMcp(agent))"), "DSH bundle does not retry mounting at session start");
+  assert(source.includes("const existing = mcpReady.get(agent.id)"), "DSH bundle does not deduplicate lifecycle mounts");
+  assert(source.includes("if (ready) await ready"), "DSH bundle does not await MCP discovery before model tool projection");
+  assert(source.includes("tools.execute({"), "DSH recall does not dispatch through the native tool registry");
+  assert(!source.includes("updateState"), "DSH lifecycle still uses local prompt-history state");
+  assert(!fs.existsSync(path.join(DSH_BUNDLE_ROOT, "state.mjs")), "obsolete DSH prompt-history module still ships");
   run(process.execPath, ["--check", path.join(DSH_BUNDLE_ROOT, "index.mjs")]);
+  run(process.execPath, ["--check", path.join(DSH_BUNDLE_ROOT, "workspace-mcp.mjs")]);
+  run(process.execPath, ["--check", path.join(ROOT, "templates", "root", ".dsh", ".dsh-mcp-client.js")]);
 }
 
 function assertRepositoryUniqueResourceNames() {
@@ -335,6 +307,10 @@ function assertDshBundle() {
     "package.json does not export the DSH lifecycle plugin"
   );
   assert(
+    manifest.exports?.["./dsh-mcp-client"] === "./templates/root/.dsh/.dsh-mcp-client.js",
+    "package.json does not export the scoped DSH MCP client"
+  );
+  assert(
     manifest.exports?.["./dsh-runner"] === "./packages/dsh-local-rag-wiki/workspace-runner.cjs",
     "package.json does not export the DSH workspace runner"
   );
@@ -347,10 +323,11 @@ function assertDshBundle() {
   assert(recallCoordinator.includes("depth: 'packet'"), "DSH recall coordinator does not request L1 packets");
   assert(recallCoordinator.includes("inFlight"), "DSH recall coordinator lacks in-flight deduplication");
   assert(recallCoordinator.includes("PACKET_WINDOW_MS"), "DSH recall coordinator lacks an L1 packet budget");
+  assert(!recallCoordinator.includes("spawn(") && !recallCoordinator.includes("process.execPath"), "DSH recall still launches a second MCP runner");
   const lifecyclePlugin = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "index.mjs"), "utf8");
   assert(lifecyclePlugin.includes("agent.ctx.plugin(mcpClient"), "DSH bundle does not mount MCP per agent workspace");
-  assert(lifecyclePlugin.includes("findAgentsRoot(workspace)"), "DSH bundle does not gate MCP tools to installed workspaces");
-  assert(lifecyclePlugin.includes("serverName: 'wiki-manager'"), "DSH bundle does not use the stable wiki-manager namespace");
+  assert(lifecyclePlugin.includes("loadWorkspaceWikiMcp(workspace)"), "DSH bundle does not gate MCP tools through workspace config");
+  assert(lifecyclePlugin.includes("../../templates/root/.dsh/.dsh-mcp-client.js"), "DSH bundle does not use the delivered scoped MCP client");
   const patch = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "cordis.patch.yml"), "utf8");
   assert(patch.includes("name: '@ihorleleka/wiki-kit/dsh'"), "DSH bundle does not mount the lifecycle plugin");
   assert(!patch.includes("@deepseek-ai/dsh-mcp-client"), "DSH bundle must not mount MCP globally outside an agent workspace");
@@ -461,6 +438,8 @@ function assertMergedInstall(targetRoot, agentsDir) {
   const claudeConfig = readJson(path.join(targetRoot, ".claude", "settings.local.json"));
   assert(claudeConfig.mcpServers["other-wiki-kit"], "existing Claude MCP server was not preserved");
   assert(claudeConfig.mcpServers["wiki-manager"], "wiki-manager Claude MCP server was not merged");
+  assert(JSON.stringify(claudeConfig.hooks || {}).includes("node user-hook.js"), "unrelated Claude hook was not preserved");
+  assert(JSON.stringify(claudeConfig.hooks || {}).includes("auto-capture.js"), "existing Claude hooks were unexpectedly removed");
 
   const opencodeConfig = readJson(path.join(targetRoot, "opencode.jsonc"));
   assert(opencodeConfig.mcp["other-wiki-kit"], "existing OpenCode MCP server was not preserved");
@@ -508,18 +487,6 @@ function main() {
   prepareScratch(DEFAULT_SMOKE_ROOT);
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", DEFAULT_SMOKE_ROOT, "--force"]);
   assertInstall(DEFAULT_SMOKE_ROOT, ".agents");
-  assertHookScriptProducesJson(DEFAULT_SMOKE_ROOT, ".agents", "session-start.js", {
-    source: "startup",
-  });
-  assertHookScriptProducesJson(DEFAULT_SMOKE_ROOT, ".agents", "auto-recall.js", {
-    prompt: "please refresh integration metadata and hook behavior",
-  });
-  assertHookScriptProducesJson(DEFAULT_SMOKE_ROOT, ".agents", "auto-capture.js", {
-    prompt: "updated mcp integration contract and recall strategy",
-    last_assistant_message: "Done with updates and verification",
-  });
-  assertHookScriptProducesJson(DEFAULT_SMOKE_ROOT, ".agents", "pre-compact.js", {});
-  assertHookScriptProducesJson(DEFAULT_SMOKE_ROOT, ".agents", "session-end.js", {});
   const defaultStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", DEFAULT_SMOKE_ROOT]);
   assert(defaultStatus.stdout.includes("Agents dir: .agents"), "status did not report default agents dir");
   assert(defaultStatus.stdout.includes("Install marker: present"), "status did not report install marker");
@@ -578,7 +545,15 @@ function main() {
   );
   fs.writeFileSync(
     path.join(mergeRoot, ".claude", "settings.local.json"),
-    `${JSON.stringify({ mcpServers: { "other-wiki-kit": { command: "node", args: ["other.js"] } } }, null, 2)}\n`,
+    `${JSON.stringify({
+      mcpServers: { "other-wiki-kit": { command: "node", args: ["other.js"] } },
+      hooks: {
+        Stop: [{ matcher: "*", hooks: [
+          { type: "command", command: "node .agents/scripts/auto-capture.js" },
+          { type: "command", command: "node user-hook.js" },
+        ] }],
+      },
+    }, null, 2)}\n`,
     "utf8"
   );
   fs.writeFileSync(

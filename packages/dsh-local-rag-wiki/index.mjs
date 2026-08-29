@@ -1,10 +1,11 @@
-import path from 'node:path'
-import * as mcpClient from '@deepseek-ai/dsh-mcp-client'
+import * as mcpClient from '../../templates/root/.dsh/.dsh-mcp-client.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { captureAssistantSummary, capturePrompt, findAgentsRoot, keywords, readState, relevantRecent, textFrom, topHints, trimState, updateState } from './state.mjs'
 import { retrieveWikiTiers, shouldRetrieve } from './recall.mjs'
+import { keywords, textFrom } from './text.mjs'
+import { loadWorkspaceWikiMcp } from './workspace-mcp.mjs'
 
 export const name = 'local-rag-wiki-lifecycle'
+const WIKI_SEARCH_TOOL = 'mcp__wiki-manager__wiki_search'
 
 function workspaceOf(agentOrSession) {
   return agentOrSession?.session?.header?.cwd
@@ -18,30 +19,6 @@ function lifecycleMessage(text) {
     content: [{ type: 'text', text }],
     source: { kind: 'plugin', plugin: name },
   })
-}
-
-function startupContext(workspace) {
-  const hints = topHints(readState(workspace))
-  if (hints.length === 0) return undefined
-  return [
-    '<wiki-kit-context source="dsh-local-rag-wiki" stage="session-start">',
-    'High-signal recurring topics from prior work:',
-    ...hints.map(hint => `- ${hint}`),
-    'Orient with wiki_tree, scan with wiki_search depth="abstract", then validate with wiki_read before reusing prior assumptions.',
-    '</wiki-kit-context>',
-  ].join('\n')
-}
-
-function recallContext(state, prompt) {
-  const matches = relevantRecent(state, prompt)
-  if (matches.length === 0) return undefined
-  return [
-    '<wiki-kit-context source="dsh-local-rag-wiki" stage="prompt-recall">',
-    'Relevant prior execution patterns:',
-    ...matches.map(item => `- ${item.prompt}${item.summary ? ` -> ${item.summary}` : ''}`),
-    'Treat this as advisory context; confirm with current code and wiki evidence.',
-    '</wiki-kit-context>',
-  ].join('\n')
 }
 
 function wikiContext(retrieval) {
@@ -61,93 +38,106 @@ function isPluginMessage(message) {
   return message?.source?.kind === 'plugin' && message.source.plugin === name
 }
 
+function resultText(result) {
+  return (Array.isArray(result?.content) ? result.content : [])
+    .filter(block => block?.type === 'text' && typeof block.text === 'string')
+    .map(block => block.text)
+    .join('\n')
+}
+
+async function executeWikiSearch(agent, payload, arguments_) {
+  const tools = agent.ctx.get('tools')
+  if (!tools?.get(WIKI_SEARCH_TOOL, agent)) throw new Error(`${WIKI_SEARCH_TOOL} is not available in the active agent scope`)
+  const result = await tools.execute({
+    callId: `${agent.session.id}:wiki-recall:${payload.turn}:${payload.step}:${arguments_.depth}`,
+    name: WIKI_SEARCH_TOOL,
+    arguments: arguments_,
+    // Retrieval is shared and bounded by the MCP tool timeout. A single caller
+    // abort only stops waiting in retrieveWikiTiers; it must not cancel another
+    // agent's in-flight workspace query.
+    signal: new AbortController().signal,
+    agent,
+  })
+  if (result.isError) throw new Error(result.error?.message || resultText(result) || `${WIKI_SEARCH_TOOL} failed`)
+  return resultText(result)
+}
+
 /** Workspace-local lifecycle behavior; unrelated repositories are ignored. */
 export function apply(ctx) {
-  const pendingCaptures = new Map()
   const mcpReady = new Map()
-  const persist = (workspace, mutate) => updateState(workspace, mutate).catch(error => {
-    console.warn(`[local-rag-wiki] could not persist workspace memory: ${error.message}`)
-    return undefined
-  })
+  const mcpMounts = new Map()
 
   const mountWikiMcp = agent => {
-    if (mcpReady.has(agent.id)) return
+    const existing = mcpReady.get(agent.id)
+    if (existing) return existing
     const workspace = workspaceOf(agent)
-    if (!workspace) return
-    const agentsRoot = findAgentsRoot(workspace)
-    if (!agentsRoot) return
-    const handle = agent.ctx.plugin(mcpClient, {
-      // The MCP client is mounted per agent context, so this stable namespace
-      // is safe and keeps model-facing names predictable across sessions.
-      serverName: 'wiki-manager',
-      transport: 'stdio',
-      command: process.execPath,
-      args: [path.join(agentsRoot, 'run-wiki-manager.mcp.js')],
-      cwd: workspace,
-      toolCallTimeoutMs: 120000,
-      failOnStartupError: true,
-      reconnect: { enabled: true, initialDelayMs: 5000, maxAttempts: 5 },
-    })
-    const ready = handle.await().catch(error => {
-      console.warn(`[local-rag-wiki] could not mount wiki MCP tools: ${error.message}`)
+    if (!workspace) return undefined
+
+    let discovered
+    try {
+      discovered = loadWorkspaceWikiMcp(workspace)
+    } catch (error) {
+      console.warn(`[local-rag-wiki] ignored invalid workspace MCP config: ${error.message}`)
       return undefined
+    }
+    if (!discovered?.server) return undefined
+    if (discovered.ignoredLegacy.length > 0) {
+      console.warn(`[local-rag-wiki] ${discovered.configPath} takes precedence over legacy ${discovered.ignoredLegacy.join(', ')}`)
+    }
+
+    const operation = (async () => {
+      const subprocess = agent.ctx.get('subprocess')
+      const command = subprocess
+        ? await subprocess.resolveExecutable(discovered.server.command)
+        : discovered.server.command
+      const handle = agent.ctx.plugin(mcpClient, { ...discovered.server, command })
+      mcpMounts.set(agent.id, handle)
+      await handle.await()
+      return true
+    })()
+    const ready = operation.catch(async error => {
+      const handle = mcpMounts.get(agent.id)
+      if (handle) await handle.dispose().catch(() => {})
+      if (mcpMounts.get(agent.id) === handle) mcpMounts.delete(agent.id)
+      if (mcpReady.get(agent.id) === ready) mcpReady.delete(agent.id)
+      console.warn(`[local-rag-wiki] could not mount wiki MCP tools from ${discovered.configPath}: ${error.message}`)
+      return false
     })
     mcpReady.set(agent.id, ready)
+    return ready
   }
 
   // agent/created normally has the session cwd, but session-start is the
   // supported startup-driving edge and also covers hosts that populate cwd
   // between the two lifecycle notifications.
   ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))
+  ctx.on('agent/session-start', ({ agent }) => mountWikiMcp(agent))
 
   ctx.on('agent/disposed', ({ agent }) => {
+    // The child plugin is owned by agent.ctx and is already unwound before this
+    // event; these maps only release coordinator references.
     mcpReady.delete(agent.id)
-  })
-
-  ctx.on('agent/session-start', ({ agent }) => {
-    mountWikiMcp(agent)
-    const context = startupContext(workspaceOf(agent))
-    if (context) agent.inject(lifecycleMessage(context))
+    mcpMounts.delete(agent.id)
   })
 
   ctx.on('agent/pre-step', async (payload, next) => {
+    // Tool schemas are frozen later in the step. Wait for initial MCP discovery
+    // here so the active model's first request already sees the workspace tools.
+    const ready = mountWikiMcp(payload.agent)
+    if (ready) await ready
     const decision = await next()
     const workspace = workspaceOf(payload.agent)
     const prompt = payload.messages.filter(message => !isPluginMessage(message)).map(textFrom).filter(Boolean).join('\n')
-    if (!workspace || !prompt) return decision
-    const state = readState(workspace)
-    const localContext = recallContext(state, prompt)
-    const retrieval = shouldRetrieve(prompt, keywords(prompt).length)
-      ? await retrieveWikiTiers(workspace, prompt, payload.signal)
-      : undefined
-    const captureId = `${payload.agent.session.id}:${payload.turn}:${Date.now()}`
-    await persist(workspace, current => capturePrompt(current, prompt, captureId))
-    pendingCaptures.set(String(payload.agent.session.id), captureId)
-    const contexts = [localContext, wikiContext(retrieval)].filter(Boolean)
-    if (contexts.length === 0) return decision
-    return { ...decision, messages: [...decision.messages, lifecycleMessage(contexts.join('\n\n'))] }
-  })
+    if (!workspace || !prompt || !shouldRetrieve(prompt, keywords(prompt).length)) return decision
 
-  ctx.on('session/event', async (session, event) => {
-    const message = event?.message || event?.payload?.message
-    if (message?.role !== 'assistant' || isPluginMessage(message)) return
-    const workspace = workspaceOf(session)
-    const sessionKey = String(session.id)
-    const captureId = pendingCaptures.get(sessionKey)
-    const summary = textFrom(message)
-    if (!workspace || !summary || !captureId) return
-    await persist(workspace, current => captureAssistantSummary(current, captureId, summary))
-    if (pendingCaptures.get(sessionKey) === captureId) pendingCaptures.delete(sessionKey)
-  })
-
-  ctx.on('agent/turn-stopping', async ({ agent }) => {
-    const workspace = workspaceOf(agent)
-    if (workspace) await persist(workspace, trimState)
-  })
-
-  ctx.on('session/flush', async session => {
-    const workspace = workspaceOf(session)
-    if (workspace) await persist(workspace, trimState)
-    pendingCaptures.delete(String(session.id))
+    const retrieval = await retrieveWikiTiers(
+      workspace,
+      prompt,
+      payload.signal,
+      arguments_ => executeWikiSearch(payload.agent, payload, arguments_),
+    )
+    const context = wikiContext(retrieval)
+    if (!context) return decision
+    return { ...decision, messages: [...decision.messages, lifecycleMessage(context)] }
   })
 }

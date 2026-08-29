@@ -1,35 +1,37 @@
 # DeepSeek Harness integration
 
-Local-Rag-Wiki supports two complementary DSH installation modes:
+Local-Rag-Wiki installs its DSH workspace assets in this `.dsh/` directory:
 
-1. **Repository install** — run `npx github:ihorleleka/Local-Rag-Wiki install .`
-   in a repository. It creates this workspace-local `mcp.servers.yml`, which
-   points DSH at the managed `wiki-manager` MCP runner.
-2. **Profile bundle (recommended)** — install the native bundle once for the
-   DSH profile you use:
+- `mcp.servers.yml` declares the managed `wiki-manager` stdio server.
+- `.dsh-mcp-client.js` is the agent-scoped MCP bridge used by the native profile
+  bundle. It discovers server tools and registers stable
+  `mcp__wiki-manager__*` tools on the active agent's DSH tool scope.
+- `package.json` marks the local bridge as an ES module. The bridge must remain
+  under `.dsh/`; no `.dsh-mcp-client.js` belongs at repository root.
 
-   ```bash
-   dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
-   ```
+Install the trusted DSH profile bundle once for the profile you use:
 
-   The profile bundle listens for `agent/created`. For each agent whose actual
-   workspace contains a Local-Rag-Wiki install marker, it mounts DSH's official
-   `@deepseek-ai/dsh-mcp-client` in that agent scope, using the workspace's
-   managed runner. This supports custom `--agents-dir` names, reconnects after
-   transport loss, discovers MCP tools, and exposes predictable
-   `mcp__wiki-manager__*` tools. The client remains agent-scoped even though
-   its namespace is stable. It also applies repository-local recall: local
-   state first, then bounded `wiki_search` L0 abstract scans and L1 packet
-   retrieval for material prompts. Full L2 `wiki_read` remains model-directed.
+```bash
+dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
+```
 
-The profile bundle is global to its DSH profile, but it does not start a wiki
-container or register wiki tools until an agent opens an installed repository.
-Restart the selected profile after adding or removing the bundle.
+After restarting that profile, the bundle listens to DSH's native agent
+lifecycle. For each active agent it reads that agent's workspace
+`.dsh/mcp.servers.yml`, validates that `wiki-manager` points to the managed
+runner beside a wiki-kit install marker, resolves the configured `node`
+executable through DSH's subprocess service, and mounts the bridge through
+`agent.ctx`. Initial discovery is awaited before the model request is assembled,
+so the model receives the workspace MCP tool schemas on its first step.
 
-The workspace config remains a no-profile-install alternative. Prefer the
-profile bundle rather than enabling both bridges, which would create duplicate
-MCP connections to the same repository service.
+The compatibility path `dsh/mcp.servers.yml` is also recognized when `.dsh/`
+is absent; `.dsh/` always wins when both exist.
 
-The Claude Code hook files under `.agents/hooks/` and
-`.claude/settings.local.json` are intentionally retained for Claude Code. DSH
-uses its native MCP bridge here; no Claude hook is copied or executed by DSH.
+DSH core does not currently auto-load `mcp.servers.yml`. The profile bundle is
+the trusted loader for these workspace assets. Do not add a second global
+`@deepseek-ai/dsh-mcp-client` row for the same `wiki-manager` server; that would
+start a duplicate connection.
+
+Automatic L0/L1 recall calls the already-registered `wiki_search` tool through
+DSH's tool registry; it never launches a second runner or captures local prompt
+history. DSH lifecycle and tool registration stay in Cordis plugins and the
+official DSH tool registry.

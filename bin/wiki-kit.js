@@ -31,7 +31,7 @@ const LEGACY_SKILL_DIRS = [
   "retrieve-knowledge",
   "wiki-maintenance",
 ];
-const MANAGED_AGENT_DIRS = ["hooks", "integrations", "plugins", "scripts"];
+const MANAGED_AGENT_DIRS = ["integrations", "plugins"];
 
 function printUsage() {
   console.log(`Usage:
@@ -536,14 +536,6 @@ function mergeJsonRootAsset(sourcePath, targetPath, relativePath, options) {
     );
   } else if (relativePath === ".claude/settings.local.json") {
     content = setJsoncPath(content, ["mcpServers", "wiki-manager"], wikiManagerJsonServer(options.agentsDir));
-    const template = JSON.parse(rewriteAgentsDir(fs.readFileSync(sourcePath, "utf8"), options.agentsDir));
-    if (template.hooks && typeof template.hooks === "object") {
-      const currentConfig = JSON.parse(stripJsonComments(content));
-      const currentHooks =
-        currentConfig.hooks && typeof currentConfig.hooks === "object" ? currentConfig.hooks : {};
-      const mergedHooks = { ...currentHooks, ...template.hooks };
-      content = setJsoncPath(content, ["hooks"], mergedHooks);
-    }
   } else if (relativePath === "opencode.jsonc") {
     content = setJsoncPath(content, ["mcp", "wiki-manager"], {
       type: "local",
@@ -651,12 +643,12 @@ function copyRootPayload(targetRoot, options) {
       continue;
     }
     const sourcePath = path.join(sourceRoot, entry.name);
-    const targetPath = path.join(targetRoot, entry.name);
+    const relativePath = entry.name;
+    const targetPath = path.join(targetRoot, relativePath);
 
     if (entry.isDirectory()) {
       copyDirectoryWithRewrite(sourcePath, targetPath, options, result);
     } else if (entry.isFile()) {
-      const relativePath = entry.name;
       recordRootAssetResult(
         targetRoot,
         targetPath,
@@ -1365,12 +1357,12 @@ function run(options) {
   );
 
   const agentsRoot = path.join(targetRoot, options.agentsDir);
-  const removedLegacySkills = copyWikiKitPayload(agentsRoot, options);
+  const removedLegacyAssets = copyWikiKitPayload(agentsRoot, options);
   const rootAssets = copyRootPayload(targetRoot, options);
 
   console.log(`${options.command === "install" ? "Installed" : "Updated"} wiki-kit in ${agentsRoot}`);
-  if (removedLegacySkills.length > 0) {
-    console.log(`Removed legacy skills: ${removedLegacySkills.join(", ")}`);
+  if (removedLegacyAssets.length > 0) {
+    console.log(`Removed legacy assets: ${removedLegacyAssets.join(", ")}`);
   }
   if (rootAssets.copied.length > 0) {
     console.log(`Copied root assets: ${rootAssets.copied.join(", ")}`);

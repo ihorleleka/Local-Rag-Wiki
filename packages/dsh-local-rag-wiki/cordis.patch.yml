@@ -1,7 +1,7 @@
 # DeepSeek Harness profile bundle for Local-Rag-Wiki.
-# The lifecycle plugin creates a scoped official MCP client only after an agent
-# opens a workspace containing a wiki-kit install marker. This is deliberately
-# not a profile-global MCP client: DSH profiles can serve several repositories.
+# The lifecycle plugin reads each agent's workspace .dsh/mcp.servers.yml and
+# mounts its managed wiki bridge through agent.ctx. This is deliberately not a
+# profile-global MCP client: one DSH profile can serve several repositories.
 - insert:
     - id: local-rag-wiki-lifecycle
       name: '@ihorleleka/wiki-kit/dsh'

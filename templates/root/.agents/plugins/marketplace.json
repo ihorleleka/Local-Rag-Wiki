@@ -6,7 +6,7 @@
   },
   "plugins": [
     {
-      "name": "wiki-kit-self-evolving",
+      "name": "wiki-kit",
       "source": {
         "source": "local",
         "path": ".agents"
