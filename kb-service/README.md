@@ -25,6 +25,7 @@ Typed note kinds: `rule`, `decision`, `reference`, `runbook`, `glossary`, and `i
 - `wiki_read` returns a `content_hash`.
 - Replacing/deleting/renaming existing notes requires the latest hash.
 - Stale hashes return a conflict instead of overwriting newer content.
+- Write, delete, rename, and capture calls schedule a targeted reindex and return immediately with `index_status: "scheduled"`; use a later read/search after indexing completes.
 
 ## Runtime defaults
 

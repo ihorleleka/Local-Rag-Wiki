@@ -1093,13 +1093,13 @@ class WikiPathSafetyTests(unittest.TestCase):
     def test_valid_nested_markdown_read_and_write(self) -> None:
         with TemporaryDirectory() as tmpdir:
             index, wiki_root = self.make_index(Path(tmpdir))
-            created = index.write_doc("guides/nested.md", "# Safe\n")
+            created = index.write_doc("components/test.md", "# Safe\n")
 
             self.assertEqual(created["status"], "ok")
-            read = index.read_doc("guides\\nested.md")
+            read = index.read_doc("components\\test.md")
             self.assertEqual(read["content"], "# Safe\n")
             self.assertEqual(read["content_hash"], created["content_hash"])
-            self.assertEqual((wiki_root / "guides" / "nested.md").read_text(encoding="utf-8"), "# Safe\n")
+            self.assertEqual((wiki_root / "components" / "test.md").read_text(encoding="utf-8"), "# Safe\n")
 
     def test_stale_concurrent_writer_cannot_overwrite_newer_content(self) -> None:
         with TemporaryDirectory() as tmpdir:

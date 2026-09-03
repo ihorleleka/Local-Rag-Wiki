@@ -491,11 +491,13 @@ class AppBehaviorTests(unittest.TestCase):
                 )
                 self.assertEqual(result["status"], "ok")
                 self.assertEqual(result["note_status"], "pending")
-                self.assertEqual(result["index_status"], "ok")
+                self.assertEqual(result["index_status"], "scheduled")
+                self.assertIsInstance(result["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.capture_calls[-1]["findings"],
                     ["Backoff timer was never reset."],
                 )
+                await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
 
         asyncio.run(run_capture_checks())
@@ -536,11 +538,13 @@ class AppBehaviorTests(unittest.TestCase):
             async with app.lifespan(app):
                 result = await write("owner.md", "updated", "current-hash")
                 self.assertEqual(result["status"], "ok")
-                self.assertEqual(result["index_status"], "ok")
+                self.assertEqual(result["index_status"], "scheduled")
+                self.assertIsInstance(result["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.write_calls,
                     [("owner.md", "updated", "current-hash")],
                 )
+                await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
 
                 DummyKnowledgeIndex.last_instance.write_doc = lambda *args: {
@@ -554,6 +558,31 @@ class AppBehaviorTests(unittest.TestCase):
 
         asyncio.run(run_write_checks())
 
+    def test_write_returns_while_a_slow_reindex_is_running(self) -> None:
+        app = self.app_module.create_app()
+        write = DummyMCP.last_instance.tools[4][1]
+
+        async def run_write_checks():
+            async with app.lifespan(app):
+                await asyncio.sleep(0.05)
+                started = threading.Event()
+                release = threading.Event()
+
+                def slow_reindex(*, cancel_event=None, progress_callback=None):
+                    started.set()
+                    release.wait(timeout=1)
+                    return {"changed": 1}
+
+                DummyKnowledgeIndex.last_instance.reindex = slow_reindex
+                result = await asyncio.wait_for(write("components/test.md", "# Test\n"), timeout=0.05)
+                self.assertEqual(result["status"], "ok")
+                self.assertEqual(result["index_status"], "scheduled")
+                self.assertTrue(await asyncio.to_thread(started.wait, 0.2))
+                release.set()
+                await asyncio.sleep(0.05)
+
+        asyncio.run(run_write_checks())
+
     def test_delete_and_rename_reindex_immediately_only_on_success(self) -> None:
         app = self.app_module.create_app()
         delete = DummyMCP.last_instance.tools[5][1]
@@ -562,19 +591,23 @@ class AppBehaviorTests(unittest.TestCase):
         async def run_mutation_checks():
             async with app.lifespan(app):
                 deleted = await delete("obsolete.md", "delete-hash")
-                self.assertEqual(deleted["index_status"], "ok")
+                self.assertEqual(deleted["index_status"], "scheduled")
+                self.assertIsInstance(deleted["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.delete_calls,
                     [("obsolete.md", "delete-hash")],
                 )
+                await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
 
                 renamed = await rename("old.md", "new.md", "rename-hash")
-                self.assertEqual(renamed["index_status"], "ok")
+                self.assertEqual(renamed["index_status"], "scheduled")
+                self.assertIsInstance(renamed["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.rename_calls,
                     [("old.md", "new.md", "rename-hash")],
                 )
+                await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 3)
 
                 DummyKnowledgeIndex.last_instance.delete_doc = lambda *args: {
