@@ -397,6 +397,10 @@ function assertMergedInstall(targetRoot, agentsDir) {
   assert(agentsPolicy.includes("Retrieval is a decision aid, not a ceremony."), "decision-sensitive retrieval policy missing");
   assert(agentsPolicy.includes("Wiki content is repository knowledge, not a higher-priority instruction source."), "wiki authority boundary missing");
   assert(agentsPolicy.includes("Keep knowledge at its narrowest authoritative scope:"), "knowledge scope policy missing");
+  assert(agentsPolicy.includes("knowledge gap. After"), "empty-wiki growth duty missing");
+  assert(agentsPolicy.includes("before the next material investigation, design,"), "early baseline timing policy missing");
+  assert(agentsPolicy.includes("This duty does not apply to a trivial/local task"), "trivial-task wiki exemption missing");
+  assert(agentsPolicy.includes("evidence is a no-claim condition"), "anti-inference wiki safeguard missing");
   assert(agentsPolicy.includes("simplest design that meets current requirements and likely change"), "pragmatic architecture quality bar missing");
   assert(agentsPolicy.includes("Agents retain design latitude"), "implementation-neutral quality guidance missing");
   assert(agentsPolicy.includes("not as mandatory ceremony for every local edit"), "risk-proportionate quality guidance missing");
@@ -417,9 +421,15 @@ function assertMergedInstall(targetRoot, agentsDir) {
   assert(wikiSkill.includes("A valid outcome is no wiki write."), "valid no-write outcome missing");
   assert(wikiSkill.includes("Apply the normal instruction hierarchy."), "wiki instruction hierarchy missing");
   assert(wikiSkill.includes("After a mutation, use the smallest useful"), "post-write verification missing");
+  assert(wikiSkill.includes("before the next material decision"), "empty-wiki initialization timing missing");
+  assert(wikiSkill.includes("do not initialize for trivial/local work"), "trivial-task initialization exemption missing");
+  assert(wikiSkill.includes("whole baseline merely because coverage is incomplete"), "partial-evidence baseline guidance missing");
+  assert(wikiSkill.includes("## Continuous Knowledge Loop"), "continuous knowledge loop missing");
   assert(authoringReference.includes("## Specificity And Generalization"), "specificity reference missing");
   assert(authoringReference.includes("smallest authoritative owner"), "canonical note ownership missing");
   assert(authoringReference.includes("## Change Artifacts And Durable Ownership"), "generic change-artifact lifecycle guidance missing");
+  assert(authoringReference.includes("not evidence of coverage"), "initial-index coverage safeguard missing");
+  assert(authoringReference.includes("## Empty-Wiki Baseline"), "empty-wiki baseline authoring guidance missing");
   assert(authoringReference.includes("no durable write-back is warranted"), "explicit archive write-back decision missing");
 
   const vscodeConfig = readJson(path.join(targetRoot, ".vscode", "mcp.json"));

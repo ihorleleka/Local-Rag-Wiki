@@ -113,16 +113,40 @@ Use this as a menu, not a checklist:
   approaches, compatibility findings, and scoped audit results.
 - `api/<area>.md`, `data/<area>.md`, `ui-patterns.md`, and `glossary.md` for their focused concerns.
 
+An initial index is navigational, not evidence of coverage: link only active
+verified owners and identify material gaps or open questions.
+
+## Empty-Wiki Baseline
+
+For an empty or non-orienting wiki, use substantive task discovery to establish
+an intentionally small baseline instead of treating initialization as separate
+work. Start with `index.md`, then add only the owners justified by verified
+facts already recovered: normally `overview.md`, and an `architecture.md` or a
+focused component/capability/runbook note when its boundary or contract shaped
+the task.
+
+Each baseline note must identify its coverage limits and exact repository-relative
+evidence. Leave uncertain product behavior and unexplored areas in `Open questions`.
+Do not manufacture completeness, copy a directory tree, or create notes for
+components that no agent inspected. Expand the map and owners incrementally as
+later work verifies more useful knowledge.
+
 ## Write-Back Planning
 
-1. Apply repository write-back criteria; stop when nothing durable and verified changed.
-2. List distinct durable topics and map each to its smallest authoritative owner.
-3. Update existing owners when scope remains cohesive; create a focused owner
+1. Apply repository write-back criteria and perform a wiki delta review after
+   meaningful discovery, design, implementation, or verification. Stop only
+   when no durable and verified knowledge changed, and record the concrete reason.
+2. If the wiki is empty/non-orienting and the task required broad codebase
+   inspection, plan the smallest verified baseline before delivery.
+3. List distinct durable topics and map each to its smallest authoritative owner.
+4. Update existing owners when scope remains cohesive; create a focused owner
    only when useful verified knowledge lacks one.
-4. Update every owner whose reusable contract changed. Do not collapse separable
+5. Update every owner whose reusable contract changed. Do not collapse separable
    frontend, backend, API, data, operations, and quality concerns into a broad note.
-5. Put useful but unverified behavior in `Open questions` or report it as follow-up.
-6. Keep workflow conventions that govern a class of changes in their own owner,
+6. Reconcile delegated evidence through the lead agent; author only claims with
+   verified anchors and retain unresolved candidates as captures or questions.
+7. Put useful but unverified behavior in `Open questions` or report it as follow-up.
+8. Keep workflow conventions that govern a class of changes in their own owner,
    not hidden only inside one feature incident.
 
 ## Change Artifacts And Durable Ownership

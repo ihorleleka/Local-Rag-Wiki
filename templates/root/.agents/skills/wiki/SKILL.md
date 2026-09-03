@@ -13,7 +13,7 @@ Markdown notes are authored truth; packets are generated retrieval artifacts.
 Choose the smallest path that satisfies the task:
 
 - **Retrieve** before a decision that repository knowledge could materially change.
-- **Initialize** when a useful wiki is intentionally being established.
+- **Initialize** when substantive work finds the wiki empty, missing, or unable to orient the task: as soon as current inspection supports a minimum verified baseline, write it before the next material decision; do not initialize for trivial/local work with no durable finding.
 - **Maintain** when durable guidance is missing, stale, conflicting, oversized, or hard to retrieve, or when a significant investigation just concluded with findings that would be non-trivial to recover.
 - **Capture** a durable, non-obvious finding mid-task with `wiki_capture` when full governed authoring is not warranted right now.
 - **Audit** for schema, provenance, drift, link, freshness, or retrieval quality checks.
@@ -85,12 +85,43 @@ load it for routine retrieval or read-only audits.
 
 ## Initialize
 
+Initialize as soon as substantive codebase orientation has produced reusable,
+verified facts; do not wait for a separate documentation task. An empty wiki
+that required broad inspection for a refactor, design, integration, or
+multi-agent task is a strong signal to initialize before delivery.
+
 1. Inspect repository purpose, entrypoints, build/test/run commands, architecture,
    and existing durable documentation before drafting.
-2. Create only verified, useful owner notes—normally an index plus focused
-   overview, runbook, rules, decisions, or capability notes that meet the quality floor.
-3. Keep unknown product behavior in `Open questions`; do not infer promises.
-4. Validate with `wiki_schema_report`, one broad search, and one focused owner search.
+2. Create the smallest coherent baseline: `index.md` plus focused overview and
+   architecture/capability/runbook owners only for facts directly verified by
+   the current work. Link focused owners from the map.
+3. Start narrow rather than produce a source inventory. Use `Open questions` for
+   unknown product behavior, uncertain boundaries, and incomplete coverage; do
+   not infer promises just to make the baseline look complete or defer the
+   whole baseline merely because coverage is incomplete.
+4. If several agents investigated, have the lead reconcile overlapping evidence,
+   choose canonical owners, and author the baseline; delegated findings alone
+   are not durable project knowledge.
+5. Validate with `wiki_schema_report`, one broad search, and one focused owner search.
+
+## Continuous Knowledge Loop
+
+During substantive work, treat repository discovery as a stream of possible
+wiki deltas rather than a final optional documentation pass:
+
+1. After each meaningful investigation, design decision, implementation slice,
+   or verification result, identify any reusable fact, contract, boundary,
+   decision, repeated pattern, or costly-to-recover negative finding.
+2. If the fact is verified and has an owner, update that owner promptly. If it
+   lacks an owner, create the smallest focused note; if it is durable but not
+   yet sufficiently verified, use `wiki_capture` rather than losing it.
+3. Before delivery, reconcile all material discoveries from the task and from
+   delegated handoffs into canonical notes. Do not leave a broad empty wiki
+   after relying on broad codebase discovery, unless you state why the evidence
+   was insufficient or the task remained truly local.
+4. Keep authoring proportional: do not create notes for routine edits, transient
+   implementation detail, or facts that future agents can recover more cheaply
+   than they can maintain. The no-write outcome must name that concrete reason.
 
 ## Maintain
 
@@ -145,7 +176,8 @@ Before finishing, verify that:
 
 ## Output
 
-Report only decision-changing wiki activity:
+For substantive work, report the initialization/write-back decision and only
+its decision-changing wiki activity:
 
 - notes/packets that materially constrained the work;
 - notes created, updated, migrated, renamed, deleted, or audited;

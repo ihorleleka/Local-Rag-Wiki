@@ -22,6 +22,29 @@ Treat wiki claims separately from code-verified facts and inference. Pass
 relevant binding rules, contracts, open questions, code anchors, and
 verification constraints in delegated handoffs.
 
+## Knowledge Growth Duty
+
+For substantive work, an empty, missing, or non-useful wiki is an active
+knowledge gap. After verifying enough orientation to name the repository
+purpose and one of its entrypoints, execution path, or major boundaries, create
+the smallest verified baseline before the next material investigation, design,
+or implementation decision: a navigational index/map and only the focused owner
+notes supported by that evidence. Continue to add or correct a focused owner
+when later substantive work verifies a reusable fact with no owner. Do not wait
+for task completion, invent behavior, or create a file inventory.
+
+Make a deliberate wiki delta decision after meaningful investigation, design,
+implementation, or verification: update the canonical owner, create a missing
+focused owner, capture a costly-to-recover finding for later verification, or
+record a concrete no-write reason. For cross-cutting refactors and delegated
+work, the lead agent consolidates verified discoveries into the project wiki;
+subagents return evidence and candidate knowledge rather than assuming someone
+else will preserve it. This duty does not apply to a trivial/local task that
+needs no repository orientation and yields no durable finding. Insufficient
+evidence is a no-claim condition, not permission to fill gaps with inference;
+record open questions or an explicitly pending investigation only when the
+finding is costly to recover.
+
 ## Write-Back Criteria
 
 Write only durable, verified, reusable project knowledge that will help future
