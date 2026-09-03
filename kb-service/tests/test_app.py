@@ -302,6 +302,7 @@ class AppBehaviorTests(unittest.TestCase):
         self.app_module.KnowledgeIndex = SlowStartingIndex
         app = self.app_module.create_app()
         self.app_module.KnowledgeIndex = original_index_class
+        schema_report = DummyMCP.last_instance.tools[3][1]
 
         async def run_health():
             async with app.lifespan(app):
@@ -309,6 +310,9 @@ class AppBehaviorTests(unittest.TestCase):
                 self.assertEqual(health["status"], "starting")
                 self.assertEqual(health["service"], "indexing")
                 self.assertEqual(health["mcp"], "running")
+                report = await asyncio.wait_for(schema_report(), timeout=0.05)
+                self.assertEqual(report["status"], "indexing")
+                self.assertEqual(report["retry_after_seconds"], 5)
                 release_reindex.set()
 
         asyncio.run(run_health())
@@ -523,8 +527,12 @@ class AppBehaviorTests(unittest.TestCase):
     def test_schema_report_tool_returns_serializable_report(self) -> None:
         app = self.app_module.create_app()
         schema_report = DummyMCP.last_instance.tools[3][1]
-        result = schema_report()
 
+        async def run_schema_report():
+            async with app.lifespan(app):
+                return await schema_report()
+
+        result = asyncio.run(run_schema_report())
         self.assertEqual(
             result,
             {"schema_version": 4, "total_files": 1, "summary": {"files_with_issues": 0}, "files": []},

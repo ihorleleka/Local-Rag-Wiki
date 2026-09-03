@@ -24,6 +24,7 @@ class Settings:
     evidence_max_anchors: int
     watch_interval_seconds: int
     startup_reindex_timeout_seconds: int
+    schema_report_timeout_seconds: int
     capture_dir: str
     hybrid_search: bool
     lexical_candidates: int
@@ -67,6 +68,7 @@ class Settings:
             evidence_max_anchors=max(1, int(os.getenv("KB_EVIDENCE_MAX_ANCHORS", "12"))),
             watch_interval_seconds=int(os.getenv("KB_WATCH_INTERVAL_SECONDS", "15")),
             startup_reindex_timeout_seconds=max(1, int(os.getenv("KB_STARTUP_REINDEX_TIMEOUT_SECONDS", "3"))),
+            schema_report_timeout_seconds=max(1, int(os.getenv("KB_SCHEMA_REPORT_TIMEOUT_SECONDS", "10"))),
             capture_dir=(os.getenv("KB_CAPTURE_DIR", "investigations").strip("/") or "investigations"),
             hybrid_search=os.getenv("KB_HYBRID_SEARCH", "1").strip().lower() not in {"0", "false", "no", "off"},
             lexical_candidates=max(1, int(os.getenv("KB_LEXICAL_CANDIDATES", "50"))),

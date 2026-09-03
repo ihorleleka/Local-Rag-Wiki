@@ -514,9 +514,29 @@ def create_app():
         return index.list_docs()
 
     @mcp.tool()
-    def wiki_schema_report():
-        """Report typed note schema health, packet gaps, stale verification, oversized notes, duplicate ids, and broken wiki links."""
-        return index.schema_report()
+    async def wiki_schema_report():
+        """Report typed note schema health, packet gaps, stale verification, oversized notes, duplicate ids, and broken wiki links. Returns a prompt retryable status while indexing or when a full audit exceeds its time budget."""
+        index_state = coordinator.snapshot()
+        if index_state["indexing_state"] in {"starting", "indexing"}:
+            return {
+                "status": "indexing",
+                "retry_after_seconds": 5,
+                "message": "The wiki index is still being built; retry the schema audit after indexing completes.",
+                "index": index_state,
+            }
+        timeout_seconds = max(1, int(getattr(settings, "schema_report_timeout_seconds", 10)))
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(index.schema_report),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            return {
+                "status": "timed_out",
+                "retry_after_seconds": 5,
+                "message": "The schema audit exceeded its time budget; the wiki remains reachable, so continue with focused retrieval and retry the audit later.",
+                "index": coordinator.snapshot(),
+            }
 
     @mcp.tool()
     async def wiki_write(path: str, content: str, expected_hash: str | None = None):

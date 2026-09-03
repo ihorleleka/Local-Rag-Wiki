@@ -40,6 +40,7 @@ Typed note kinds: `rule`, `decision`, `reference`, `runbook`, `glossary`, and `i
 - `KB_MAX_TOP_K=20`
 - `KB_MIN_RELEVANCE=0.35`
 - `KB_STALENESS_DAYS=90`
+- `KB_SCHEMA_REPORT_TIMEOUT_SECONDS=10`
 
 ## Run directly (without wiki-kit)
 

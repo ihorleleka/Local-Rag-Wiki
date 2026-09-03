@@ -60,6 +60,7 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.note_max_lines, 200)
         self.assertEqual(settings.evidence_max_anchors, 12)
         self.assertEqual(settings.startup_reindex_timeout_seconds, 3)
+        self.assertEqual(settings.schema_report_timeout_seconds, 10)
         self.assertTrue(settings.hybrid_search)
         self.assertEqual(settings.lexical_candidates, 50)
         self.assertEqual(settings.rrf_k, 60)
