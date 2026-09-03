@@ -704,10 +704,33 @@ function main() {
   const wrapperMarker = readJson(wrapperMarkerPath);
   wrapperMarker.package = ROOT;
   fs.writeFileSync(wrapperMarkerPath, `${JSON.stringify(wrapperMarker, null, 2)}\n`, "utf8");
-  run(wrapperCommand, wrapperArgs, {
+  const wrapperFakeDockerDir = path.join(CUSTOM_SMOKE_ROOT, "wrapper-fake-docker");
+  fs.mkdirSync(wrapperFakeDockerDir, { recursive: true });
+  const fakeDocker = path.join(wrapperFakeDockerDir, process.platform === "win32" ? "docker.cmd" : "docker");
+  const fakeDockerLog = path.join(wrapperFakeDockerDir, "arguments.log");
+  fs.writeFileSync(
+    fakeDocker,
+    process.platform === "win32"
+      ? "@echo off\r\necho %* > \"%WIKI_KIT_DOCKER_LOG%\"\r\nexit /b 0\r\n"
+      : "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" > \"$WIKI_KIT_DOCKER_LOG\"\nexit 0\n",
+    "utf8"
+  );
+  if (process.platform !== "win32") fs.chmodSync(fakeDocker, 0o755);
+  const wrapperResult = run(wrapperCommand, wrapperArgs, {
     cwd: CUSTOM_SMOKE_ROOT,
-    env: { ...process.env },
+    env: {
+      ...process.env,
+      PATH: `${wrapperFakeDockerDir}${path.delimiter}${process.env.PATH || ""}`,
+      Path: `${wrapperFakeDockerDir}${path.delimiter}${process.env.Path || process.env.PATH || ""}`,
+      WIKI_KIT_DOCKER_LOG: fakeDockerLog,
+    },
   });
+  assert(wrapperResult.status === 0, "update wrapper failed");
+  const pulledArguments = fs.existsSync(fakeDockerLog) ? fs.readFileSync(fakeDockerLog, "utf8") : "";
+  assert(
+    pulledArguments.includes("pull") && pulledArguments.includes(DEFAULT_IMAGE),
+    "update wrapper did not pull the installed image"
+  );
   assertInstall(CUSTOM_SMOKE_ROOT, "wiki-kit-agent");
   assert(
     !fs.existsSync(path.join(CUSTOM_SMOKE_ROOT, ".agents")),
