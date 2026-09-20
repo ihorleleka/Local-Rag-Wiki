@@ -83,7 +83,3 @@ contracts.
 - Keep generated/synchronized artifacts, data changes, and deployment steps in
   their required order and leave a reproducible verification path.
 <!-- END WIKI-KIT MANAGED WIKI POLICY -->
-
-## Novicell Web UI parity
-
-Novicell frontend work uses the checked-in `novicell.com.Web.UI` project as the presentation and interaction source of truth. Before implementing or changing any frontend component, inspect its corresponding Novicell component and reuse the same HTML structure, class names, CSS values, responsive behavior, accessibility semantics, and interaction logic wherever the Elizabeth runtime permits. Custom implementations may replace framework or search dependencies, but the replacement MUST look and behave identically; any unavoidable deviation requires explicit documentation and parity-focused verification. Novicell packages are reference evidence only and must not become Elizabeth runtime or build dependencies.
