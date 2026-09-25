@@ -168,7 +168,7 @@ async function assertLifecycleIntegration() {
     for (const message of decision.messages) session.append('user/message', message, { surfaceOp: 'append' })
     assert.match(session.deriveMessages().at(-1).content[0].text, /Lifecycle MCP verification result/)
     await ctx.serial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
-    const visibleRecall = session.deriveMessages().filter(message => message.source?.plugin === 'local-rag-wiki-lifecycle')
+    const visibleRecall = session.deriveMessages().filter(message => message.source?.kind === 'local-rag-wiki')
     assert.equal(visibleRecall.length, 1, 'recall projection must occupy one visible surface slot')
     assert.match(visibleRecall[0].content[0].text, /state="expired"/)
     assert.doesNotMatch(visibleRecall[0].content[0].text, /Lifecycle MCP verification result/)

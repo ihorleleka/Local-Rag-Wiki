@@ -5,6 +5,7 @@ import { keywords, textFrom } from './text.mjs'
 import { loadWorkspaceWikiMcp } from './workspace-mcp.mjs'
 
 export const name = 'local-rag-wiki-lifecycle'
+const MESSAGE_SOURCE_KIND = 'local-rag-wiki'
 const WIKI_SEARCH_TOOL = 'mcp__wiki-manager__wiki_search'
 
 function workspaceOf(agentOrSession) {
@@ -17,7 +18,7 @@ function workspaceOf(agentOrSession) {
 function lifecycleMessage(text, turn, state = 'active') {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: 'plugin', plugin: name, form: 'wiki-recall', state, turn },
+    source: { kind: MESSAGE_SOURCE_KIND, form: 'wiki-recall', state, turn },
   })
 }
 
@@ -39,7 +40,7 @@ function activeRecallEvent(agent, turn) {
   for (const event of [...events].reverse()) {
     const source = event?.data?.source
     if (event?.type !== 'user/message' || !visible.has(event.seq)) continue
-    if (source?.kind !== 'plugin' || source.plugin !== name || source.form !== 'wiki-recall' || source.state !== 'active') continue
+    if (source?.kind !== MESSAGE_SOURCE_KIND || source.form !== 'wiki-recall' || source.state !== 'active') continue
     if (turn === undefined || source.turn === turn) return event
   }
   return undefined
@@ -77,7 +78,7 @@ function wikiContext(retrieval) {
 }
 
 function isPluginMessage(message) {
-  return message?.source?.kind === 'plugin' && message.source.plugin === name
+  return message?.source?.kind === MESSAGE_SOURCE_KIND && message.source.form === 'wiki-recall'
 }
 
 function resultText(result) {
