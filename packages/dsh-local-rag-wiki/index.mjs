@@ -33,9 +33,10 @@ function directUserPrompt(messages) {
 
 function activeRecallEvent(agent, turn) {
   const session = agent?.session
-  if (!session?.events || !session?.surface?.nodes) return undefined
+  if (!session?.surface?.nodes || typeof session.snapshotEvents !== 'function') return undefined
+  const events = session.snapshotEvents()
   const visible = new Set(session.surface.nodes)
-  for (const event of [...session.events].reverse()) {
+  for (const event of [...events].reverse()) {
     const source = event?.data?.source
     if (event?.type !== 'user/message' || !visible.has(event.seq)) continue
     if (source?.kind !== 'plugin' || source.plugin !== name || source.form !== 'wiki-recall' || source.state !== 'active') continue
@@ -55,7 +56,7 @@ function expireWikiContext(agent, turn) {
       'expired',
     ),
     {
-      surfaceOp: { op: 'replace', start: event.seq, end: event.seq },
+      surfaceOp: { op: 'replace', startSeq: event.seq, endSeq: event.seq },
       sourceEventSeqs: [event.seq],
     },
   )

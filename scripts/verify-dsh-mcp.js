@@ -119,9 +119,10 @@ async function assertLifecycleIntegration() {
   await ctx.plugin(lifecycle).await()
   const tools = ctx.get('tools')
   const session = Session.create('lifecycle-agent', undefined, {
-    version: 0,
+    version: 4,
     id: 'lifecycle-agent',
     createdAt: Date.now(),
+    isSeeded: false,
     cwd: workspace,
   })
   const agent = { id: 'lifecycle-agent', session }
