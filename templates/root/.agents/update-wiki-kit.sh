@@ -12,6 +12,10 @@ npx --yes --legacy-peer-deps "$WIKI_KIT_PACKAGE" update "$SCRIPT_DIR/.." --agent
 
 WIKI_KIT_IMAGE="$(node -e "const fs=require('fs');const path=require('path');const marker=path.resolve(process.argv[1],'.wiki-kit-install.json');const data=JSON.parse(fs.readFileSync(marker,'utf8'));if(typeof data.defaultImage!=='string'||!data.defaultImage.trim())throw new Error('installed wiki-kit marker has no default image');process.stdout.write(data.defaultImage.trim());" "$SCRIPT_DIR")"
 docker pull "$WIKI_KIT_IMAGE"
+if ! docker image inspect --format '{{.Id}}' "$WIKI_KIT_IMAGE"; then
+  printf 'Failed to verify local wiki service image: %s\n' "$WIKI_KIT_IMAGE" >&2
+  exit 1
+fi
 
 printf '\nPulled wiki service image: %s\n' "$WIKI_KIT_IMAGE"
 printf 'Restart the wiki service to use the new image:\n'

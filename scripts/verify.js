@@ -666,6 +666,8 @@ function main() {
   for (const updater of ["update-wiki-kit.cmd", "update-wiki-kit.sh"]) {
     const updaterSource = fs.readFileSync(path.join(ROOT, "templates", "root", ".agents", updater), "utf8");
     assert(updaterSource.includes("npx --yes --legacy-peer-deps"), `${updater} must tolerate peer dependency resolution during updates`);
+    assert(updaterSource.includes("docker pull"), `${updater} must pull the configured image`);
+    assert(updaterSource.includes("docker image inspect"), `${updater} must verify the pulled image locally`);
   }
   const wrapperName = process.platform === "win32" ? "update-wiki-kit.cmd" : "update-wiki-kit.sh";
   const wrapperPath = path.join(CUSTOM_SMOKE_ROOT, "wiki-kit-agent", wrapperName);
@@ -682,8 +684,8 @@ function main() {
   fs.writeFileSync(
     fakeDocker,
     process.platform === "win32"
-      ? "@echo off\r\necho %* > \"%WIKI_KIT_DOCKER_LOG%\"\r\nexit /b 0\r\n"
-      : "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" > \"$WIKI_KIT_DOCKER_LOG\"\nexit 0\n",
+      ? "@echo off\r\necho %* >> \"%WIKI_KIT_DOCKER_LOG%\"\r\nexit /b 0\r\n"
+      : "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$WIKI_KIT_DOCKER_LOG\"\nexit 0\n",
     "utf8"
   );
   if (process.platform !== "win32") fs.chmodSync(fakeDocker, 0o755);

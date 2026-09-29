@@ -13,6 +13,11 @@ if errorlevel 1 exit /b %ERRORLEVEL%
 for /f "usebackq delims=" %%I in (`node -e "const fs=require('fs');const path=require('path');const marker=path.resolve(process.argv[1],'.wiki-kit-install.json');const data=JSON.parse(fs.readFileSync(marker,'utf8'));if(typeof data.defaultImage!=='string'||!data.defaultImage.trim())throw new Error('installed wiki-kit marker has no default image');process.stdout.write(data.defaultImage.trim());" "%~dp0."`) do set "WIKI_KIT_IMAGE=%%I"
 docker pull "%WIKI_KIT_IMAGE%"
 if errorlevel 1 exit /b %ERRORLEVEL%
+docker image inspect --format "{{.Id}}" "%WIKI_KIT_IMAGE%"
+if errorlevel 1 (
+  echo Failed to verify local wiki service image: %WIKI_KIT_IMAGE% 1>&2
+  exit /b 1
+)
 
 echo.
 echo Pulled wiki service image: %WIKI_KIT_IMAGE%
