@@ -193,6 +193,12 @@ async function assertLifecycleIntegration() {
 async function main() {
   reset()
   const { loadWorkspaceWikiMcp } = await import(pathToFileURL(LOADER).href)
+  const managedConfig = fs.readFileSync(
+    path.join(ROOT, 'templates', 'root', '.dsh', 'mcp.servers.yml'),
+    'utf8',
+  )
+  assert.match(managedConfig, /failOnStartupError:\s*false/)
+  assert.match(managedConfig, /reconnect:\s*\n\s+enabled:\s*true/)
 
   const missing = path.join(SCRATCH, 'missing')
   fs.mkdirSync(missing)

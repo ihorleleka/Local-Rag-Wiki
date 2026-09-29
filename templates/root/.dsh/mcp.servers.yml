@@ -4,7 +4,9 @@ servers:
     command: node
     args: [".agents/run-wiki-manager.mcp.js"]
     toolCallTimeoutMs: 120000
-    failOnStartupError: true
+    # Keep the agent usable while Docker Desktop is starting; the scoped bridge
+    # retries and registers wiki tools when the daemon becomes reachable.
+    failOnStartupError: false
     reconnect:
       enabled: true
       initialDelayMs: 5000

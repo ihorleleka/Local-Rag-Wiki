@@ -105,6 +105,42 @@ function assertNetworkExposureGuard() {
   }
 }
 
+function assertDockerUnavailableFailsClearly() {
+  const unavailableDockerHost = process.platform === "win32"
+    ? "npipe:////./pipe/wiki-kit-docker-unavailable"
+    : "unix:///tmp/wiki-kit-docker-unavailable.sock";
+  const result = spawnSync(process.execPath, [RUNNER_PATH], {
+    cwd: SCRATCH_ROOT,
+    env: {
+      ...TEST_ENV,
+      DOCKER_HOST: unavailableDockerHost,
+      KB_DOCKER_DAEMON_TIMEOUT_MS: "100",
+    },
+    input: `${JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "docker-unavailable-verifier", version: "1.0.0" },
+      },
+    })}\n`,
+    encoding: "utf8",
+    stdio: "pipe",
+    windowsHide: true,
+    timeout: 30000,
+  });
+  const output = `${result.stdout || ""}${result.stderr || ""}`;
+  if (
+    result.status === 0 ||
+    !output.includes("Docker Desktop's Linux engine is unavailable") ||
+    !output.includes("wiki-manager will retry automatically")
+  ) {
+    fail("Docker-unavailable startup did not provide recovery guidance", output.trim());
+  }
+}
+
 function assertUnhealthyStartupFailsClearly() {
   fs.writeFileSync(
     path.join(SCRATCH_ROOT, "wiki", "startup-failure-probe.md"),
@@ -300,6 +336,7 @@ async function main() {
   cleanup();
   prepareInstall();
   assertNetworkExposureGuard();
+  assertDockerUnavailableFailsClearly();
   assertUnhealthyStartupFailsClearly();
 
   const clientA = createClient("wiki-kit-runner-verifier-a");

@@ -43,10 +43,12 @@ lifecycle, the bundle reads the active workspace's `.dsh/mcp.servers.yml`,
 validates its `wiki-manager` entry against the managed install marker, resolves
 the configured `node` executable through DSH's subprocess service, and mounts
 the bridge through `agent.ctx`. It never uses `process.execPath`, because that
-is the Electron executable in DSH Desktop. Initial discovery finishes before
-the model request is assembled, exposing stable native
-`mcp__wiki-manager__*` tools on that agent's tool scope. Identical namespaces
-can coexist in different agent scopes without leaking tools between sessions.
+is the Electron executable in DSH Desktop. When Docker is reachable, initial
+discovery finishes before the model request is assembled, exposing stable native
+`mcp__wiki-manager__*` tools on that agent's tool scope. If Docker Desktop is
+still starting, the session remains usable and the bridge retries in the
+background until it can register those tools. Identical namespaces can coexist
+in different agent scopes without leaking tools between sessions.
 
 The scoped bridge source is delivered as `.dsh/.dsh-mcp-client.js` (never at
 repository root) and follows DSH's MCP transport, reconnect, tool-schema, and

@@ -75,6 +75,13 @@ const HEALTH_TIMEOUT_MS = parseTimeoutMs(
   70000,
   "KB_HEALTH_TIMEOUT_MS"
 );
+// Docker Desktop can expose the CLI before its Linux engine is ready. Wait a
+// bounded interval so a normal Desktop startup does not fail the MCP bridge.
+const DOCKER_DAEMON_TIMEOUT_MS = parseTimeoutMs(
+  process.env.KB_DOCKER_DAEMON_TIMEOUT_MS,
+  30000,
+  "KB_DOCKER_DAEMON_TIMEOUT_MS"
+);
 const POLL_INTERVAL_MS = 500;
 
 let shuttingDown = false;
@@ -267,8 +274,11 @@ async function getContainerState(container) {
       port: binding?.HostPort || null,
       hostIp: binding?.HostIp || null,
     };
-  } catch {
-    return { running: false, port: null, hostIp: null };
+  } catch (error) {
+    if (isMissingContainerError(error)) {
+      return { running: false, port: null, hostIp: null };
+    }
+    throw error;
   }
 }
 
@@ -331,11 +341,42 @@ function runCapture(command, args, options = {}) {
   });
 }
 
+function isMissingContainerError(error) {
+  return /no such (?:object|container)/i.test(String(error?.message || error));
+}
+
+async function ensureDockerDaemon() {
+  let lastError;
+  const deadline = Date.now() + DOCKER_DAEMON_TIMEOUT_MS;
+  do {
+    try {
+      await runCapture("docker", ["info", "--format", "{{.ServerVersion}}"], {
+        echoStderr: false,
+      });
+      return;
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        throw new Error("Docker CLI was not found. Install Docker Desktop (or Docker Engine) and ensure docker is on PATH.", { cause: error });
+      }
+      if (!isDockerDaemonUnavailable(error)) throw error;
+      lastError = error;
+    }
+    if (Date.now() >= deadline) break;
+    await wait(POLL_INTERVAL_MS);
+  } while (Date.now() < deadline);
+
+  throw new Error(dockerUnavailableMessage(lastError), { cause: lastError });
+}
+
 async function removeContainer() {
   if (!containerName) return;
-  await runCapture("docker", ["rm", "-f", containerName], {
-    echoStderr: false,
-  }).catch(() => {});
+  try {
+    await runCapture("docker", ["rm", "-f", containerName], {
+      echoStderr: false,
+    });
+  } catch (error) {
+    if (!isMissingContainerError(error)) throw error;
+  }
 }
 
 async function startContainer(port) {
@@ -416,10 +457,32 @@ async function startContainer(port) {
   await run("docker", dockerArgs);
 }
 
+function isDockerDaemonUnavailable(error) {
+  const message = String(error?.message || error).toLowerCase();
+  return [
+    "failed to connect to the docker api",
+    "dockerdesktoplinuxengine",
+    "docker daemon is not running",
+    "cannot connect to the docker daemon",
+    "is the docker daemon running",
+  ].some(fragment => message.includes(fragment));
+}
+
+function dockerUnavailableMessage(error) {
+  return [
+    "Docker Desktop's Linux engine is unavailable.",
+    "Start Docker Desktop (or wait for it to finish starting), then keep this agent session open; wiki-manager will retry automatically.",
+    `Docker detail: ${error.message}`,
+  ].join(" ");
+}
+
 async function startOrAttachContainer(port) {
   try {
     await startContainer(port);
   } catch (startError) {
+    if (isDockerDaemonUnavailable(startError)) {
+      throw new Error(dockerUnavailableMessage(startError), { cause: startError });
+    }
     const attachedPort = await attachToRunningContainer(containerName);
     if (attachedPort !== null) {
       return makeUrls(attachedPort).mcpUrl;
@@ -435,6 +498,9 @@ async function startOrAttachContainer(port) {
       const raceWinnerPort = await attachToRunningContainer(containerName);
       if (raceWinnerPort !== null) {
         return makeUrls(raceWinnerPort).mcpUrl;
+      }
+      if (isDockerDaemonUnavailable(retryError)) {
+        throw new Error(dockerUnavailableMessage(retryError), { cause: retryError });
       }
       throw new Error(
         `Unable to start or attach to KB container "${containerName}": ${retryError.message}`,
@@ -670,6 +736,8 @@ async function main() {
   kbVolume = resourceNames.kbVolume;
   modelCacheVolume = resourceNames.hfCacheVolume;
   containerName = resourceNames.containerName;
+
+  await ensureDockerDaemon();
 
   const lifecycleCommand = (process.env.KB_LIFECYCLE_COMMAND || "").trim().toLowerCase();
   if (lifecycleCommand === "stop") {
