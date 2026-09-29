@@ -663,6 +663,10 @@ function main() {
     "direct custom update without --agents-dir created a second default installation"
   );
 
+  for (const updater of ["update-wiki-kit.cmd", "update-wiki-kit.sh"]) {
+    const updaterSource = fs.readFileSync(path.join(ROOT, "templates", "root", ".agents", updater), "utf8");
+    assert(updaterSource.includes("npx --yes --legacy-peer-deps"), `${updater} must tolerate peer dependency resolution during updates`);
+  }
   const wrapperName = process.platform === "win32" ? "update-wiki-kit.cmd" : "update-wiki-kit.sh";
   const wrapperPath = path.join(CUSTOM_SMOKE_ROOT, "wiki-kit-agent", wrapperName);
   const wrapperCommand = process.platform === "win32" ? "cmd.exe" : "sh";
