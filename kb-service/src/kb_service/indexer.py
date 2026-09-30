@@ -1849,7 +1849,6 @@ class KnowledgeIndex:
         retrieval_hints: list[str] | None = None,
         applies_to: list[str] | None = None,
         path: str | None = None,
-        expected_hash: str | None = None,
     ) -> dict[str, Any]:
         if not str(title or "").strip():
             return {"status": "error", "reason": "title_required"}
@@ -1868,7 +1867,7 @@ class KnowledgeIndex:
             applies_to=applies_to,
             note_id=slug,
         )
-        result = self.write_doc(rel_path, content, expected_hash)
+        result = self.write_doc(rel_path, content)
         if result.get("status") == "ok":
             result["kind"] = "investigation"
             result["note_status"] = "pending"
@@ -1902,40 +1901,14 @@ class KnowledgeIndex:
         return {
             "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
             "content": content,
-            "content_hash": sha256_text(content),
         }
 
-    def write_doc(
-        self,
-        rel_path: str,
-        content: str,
-        expected_hash: str | None = None,
-    ) -> dict[str, Any]:
+    def write_doc(self, rel_path: str, content: str) -> dict[str, Any]:
         target = self._resolve_wiki_markdown_path(rel_path)
-        current_content = target.read_text(encoding="utf-8") if target.exists() else None
-        current_hash = sha256_text(current_content) if current_content is not None else None
-        if current_content is not None and expected_hash is None:
-            return {
-                "status": "conflict",
-                "reason": "expected_hash_required",
-                "path": rel_path.replace("\\", "/"),
-                "current_hash": current_hash,
-            }
-        if expected_hash is not None and expected_hash != current_hash:
-            return {
-                "status": "conflict",
-                "reason": "hash_mismatch",
-                "path": rel_path.replace("\\", "/"),
-                "expected_hash": expected_hash,
-                "current_hash": current_hash,
-            }
-
         atomic_write_text(target, content)
         return {
             "status": "ok",
             "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
-            "previous_hash": current_hash,
-            "content_hash": sha256_text(content),
         }
 
     @staticmethod
@@ -1959,24 +1932,13 @@ class KnowledgeIndex:
                 inbound.append(candidate_rel)
         return inbound
 
-    def delete_doc(self, rel_path: str, expected_hash: str) -> dict[str, Any]:
+    def delete_doc(self, rel_path: str) -> dict[str, Any]:
         target = self._resolve_wiki_markdown_path(rel_path)
         if not target.exists():
             return {
                 "status": "conflict",
                 "reason": "not_found",
                 "path": rel_path.replace("\\", "/"),
-                "current_hash": None,
-            }
-        current_content = target.read_text(encoding="utf-8")
-        current_hash = sha256_text(current_content)
-        if expected_hash != current_hash:
-            return {
-                "status": "conflict",
-                "reason": "hash_mismatch",
-                "path": rel_path.replace("\\", "/"),
-                "expected_hash": expected_hash,
-                "current_hash": current_hash,
             }
         inbound_links = self._inbound_links(rel_path)
         if inbound_links:
@@ -1984,21 +1946,18 @@ class KnowledgeIndex:
                 "status": "conflict",
                 "reason": "inbound_links_exist",
                 "path": rel_path.replace("\\", "/"),
-                "current_hash": current_hash,
                 "inbound_links": inbound_links,
             }
         target.unlink()
         return {
             "status": "ok",
             "path": rel_path.replace("\\", "/"),
-            "deleted_hash": current_hash,
         }
 
     def rename_doc(
         self,
         source_path: str,
         destination_path: str,
-        expected_hash: str,
     ) -> dict[str, Any]:
         source = self._resolve_wiki_markdown_path(source_path)
         destination = self._resolve_wiki_markdown_path(destination_path)
@@ -2007,17 +1966,6 @@ class KnowledgeIndex:
                 "status": "conflict",
                 "reason": "not_found",
                 "source_path": source_path.replace("\\", "/"),
-                "current_hash": None,
-            }
-        current_content = source.read_text(encoding="utf-8")
-        current_hash = sha256_text(current_content)
-        if expected_hash != current_hash:
-            return {
-                "status": "conflict",
-                "reason": "hash_mismatch",
-                "source_path": source_path.replace("\\", "/"),
-                "expected_hash": expected_hash,
-                "current_hash": current_hash,
             }
         if destination.exists():
             destination_content = destination.read_text(encoding="utf-8")
@@ -2026,7 +1974,6 @@ class KnowledgeIndex:
                 "reason": "destination_exists",
                 "source_path": source_path.replace("\\", "/"),
                 "destination_path": destination_path.replace("\\", "/"),
-                "destination_hash": sha256_text(destination_content),
             }
         inbound_links = self._inbound_links(source_path)
         if inbound_links:
@@ -2034,7 +1981,6 @@ class KnowledgeIndex:
                 "status": "conflict",
                 "reason": "inbound_links_exist",
                 "source_path": source_path.replace("\\", "/"),
-                "current_hash": current_hash,
                 "inbound_links": inbound_links,
             }
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -2043,6 +1989,5 @@ class KnowledgeIndex:
             "status": "ok",
             "source_path": source_path.replace("\\", "/"),
             "destination_path": destination.relative_to(self.settings.wiki_root.resolve()).as_posix(),
-            "content_hash": current_hash,
         }
 

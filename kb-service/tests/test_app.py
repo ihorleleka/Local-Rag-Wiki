@@ -50,7 +50,7 @@ class DummyKnowledgeIndex:
 
     def read_doc(self, path):
         self.read_calls.append(path)
-        return {"path": path, "content": "document body", "content_hash": "hash"}
+        return {"path": path, "content": "document body"}
 
     def list_docs(self):
         return ["wiki/page.md"]
@@ -77,7 +77,6 @@ class DummyKnowledgeIndex:
         return {
             "status": "ok",
             "path": f"investigations/{kwargs.get('title', 'x').lower()}.md",
-            "content_hash": "capture-hash",
             "kind": "investigation",
             "note_status": "pending",
         }
@@ -85,21 +84,20 @@ class DummyKnowledgeIndex:
     def schema_report(self):
         return {"schema_version": 4, "total_files": 1, "summary": {"files_with_issues": 0}, "files": []}
 
-    def write_doc(self, path, content, expected_hash=None):
-        self.write_calls.append((path, content, expected_hash))
-        return {"status": "ok", "path": path, "content_hash": "new-hash"}
+    def write_doc(self, path, content):
+        self.write_calls.append((path, content))
+        return {"status": "ok", "path": path}
 
-    def delete_doc(self, path, expected_hash):
-        self.delete_calls.append((path, expected_hash))
-        return {"status": "ok", "path": path, "deleted_hash": expected_hash}
+    def delete_doc(self, path):
+        self.delete_calls.append(path)
+        return {"status": "ok", "path": path}
 
-    def rename_doc(self, source_path, destination_path, expected_hash):
-        self.rename_calls.append((source_path, destination_path, expected_hash))
+    def rename_doc(self, source_path, destination_path):
+        self.rename_calls.append((source_path, destination_path))
         return {
             "status": "ok",
             "source_path": source_path,
             "destination_path": destination_path,
-            "content_hash": expected_hash,
         }
 
 
@@ -230,7 +228,7 @@ class AppBehaviorTests(unittest.TestCase):
             "Prefer packet results",
             "Use wiki_read",
             "honest knowledge gap",
-            "content_hash as expected_hash",
+            "atomically replaces whole Markdown notes",
         ]:
             self.assertIn(phrase, DummyMCP.last_instance.instructions)
 
@@ -345,7 +343,7 @@ class AppBehaviorTests(unittest.TestCase):
 
         self.assertEqual(
             result,
-            {"path": "owner.md", "content": "document body", "content_hash": "hash"},
+            {"path": "owner.md", "content": "document body"},
         )
 
     def test_search_miss_is_empty_diagnostic_not_error(self) -> None:
@@ -376,7 +374,7 @@ class AppBehaviorTests(unittest.TestCase):
         result = asyncio.run(read_version())
         self.assertEqual(result["service"], "kb-service")
         self.assertEqual(result["index_schema_version"], 7)
-        self.assertEqual(result["mcp_tool_contract_version"], 5)
+        self.assertEqual(result["mcp_tool_contract_version"], 6)
         self.assertIsInstance(result["service_version"], str)
 
     def test_packet_search_fixtures_are_canonical_compact_and_bounded(self) -> None:
@@ -538,30 +536,29 @@ class AppBehaviorTests(unittest.TestCase):
             {"schema_version": 4, "total_files": 1, "summary": {"files_with_issues": 0}, "files": []},
         )
 
-    def test_write_tool_passes_expected_hash_and_reindexes_only_on_success(self) -> None:
+    def test_write_tool_reindexes_only_on_success(self) -> None:
         app = self.app_module.create_app()
         write = DummyMCP.last_instance.tools[4][1]
 
         async def run_write_checks():
             async with app.lifespan(app):
-                result = await write("owner.md", "updated", "current-hash")
+                result = await write("owner.md", "updated")
                 self.assertEqual(result["status"], "ok")
                 self.assertEqual(result["index_status"], "scheduled")
                 self.assertIsInstance(result["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.write_calls,
-                    [("owner.md", "updated", "current-hash")],
+                    [("owner.md", "updated")],
                 )
                 await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
 
                 DummyKnowledgeIndex.last_instance.write_doc = lambda *args: {
-                    "status": "conflict",
-                    "reason": "hash_mismatch",
-                    "current_hash": "newer-hash",
+                    "status": "error",
+                    "reason": "write_failed",
                 }
-                conflict = await write("owner.md", "stale", "old-hash")
-                self.assertEqual(conflict["status"], "conflict")
+                error = await write("owner.md", "stale")
+                self.assertEqual(error["status"], "error")
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
 
         asyncio.run(run_write_checks())
@@ -598,33 +595,32 @@ class AppBehaviorTests(unittest.TestCase):
 
         async def run_mutation_checks():
             async with app.lifespan(app):
-                deleted = await delete("obsolete.md", "delete-hash")
+                deleted = await delete("obsolete.md")
                 self.assertEqual(deleted["index_status"], "scheduled")
                 self.assertIsInstance(deleted["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.delete_calls,
-                    [("obsolete.md", "delete-hash")],
+                    ["obsolete.md"],
                 )
                 await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 2)
 
-                renamed = await rename("old.md", "new.md", "rename-hash")
+                renamed = await rename("old.md", "new.md")
                 self.assertEqual(renamed["index_status"], "scheduled")
                 self.assertIsInstance(renamed["index_generation"], int)
                 self.assertEqual(
                     DummyKnowledgeIndex.last_instance.rename_calls,
-                    [("old.md", "new.md", "rename-hash")],
+                    [("old.md", "new.md")],
                 )
                 await asyncio.sleep(0.05)
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 3)
 
                 DummyKnowledgeIndex.last_instance.delete_doc = lambda *args: {
-                    "status": "conflict",
-                    "reason": "hash_mismatch",
-                    "current_hash": "newer-hash",
+                    "status": "error",
+                    "reason": "delete_failed",
                 }
-                conflict = await delete("obsolete.md", "stale-hash")
-                self.assertEqual(conflict["status"], "conflict")
+                error = await delete("obsolete.md")
+                self.assertEqual(error["status"], "error")
                 self.assertEqual(DummyKnowledgeIndex.last_instance.reindex_calls, 3)
 
         asyncio.run(run_mutation_checks())

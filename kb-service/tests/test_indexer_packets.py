@@ -396,7 +396,7 @@ Covers the scheduler retry path only; queue consumers not audited.
         self.assertTrue(module._path_within_scope("components/page.md", "components/page.md"))
         self.assertFalse(module._path_within_scope("components/page.md", "components/other.md"))
 
-    def test_capture_writes_pending_investigation_and_conflicts_on_repeat(self) -> None:
+    def test_capture_writes_pending_investigation_and_replaces_on_repeat(self) -> None:
         with TemporaryDirectory() as tmpdir:
             wiki_root = Path(tmpdir) / "wiki"
             wiki_root.mkdir()
@@ -437,7 +437,7 @@ Covers the scheduler retry path only; queue consumers not audited.
                 context="Second attempt.",
                 findings=["Different finding."],
             )
-            self.assertEqual(conflict["status"], "conflict")
+            self.assertEqual(conflict["status"], "ok")
 
     def test_tree_reports_navigable_structure_from_manifest(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1098,19 +1098,17 @@ class WikiPathSafetyTests(unittest.TestCase):
             self.assertEqual(created["status"], "ok")
             read = index.read_doc("components\\test.md")
             self.assertEqual(read["content"], "# Safe\n")
-            self.assertEqual(read["content_hash"], created["content_hash"])
             self.assertEqual((wiki_root / "components" / "test.md").read_text(encoding="utf-8"), "# Safe\n")
 
     def test_stale_concurrent_writer_cannot_overwrite_newer_content(self) -> None:
         with TemporaryDirectory() as tmpdir:
             index, _ = self.make_index(Path(tmpdir))
             created = index.write_doc("owner.md", "version one")
-            expected_hash = created["content_hash"]
             barrier = Barrier(2)
 
             def write(content: str):
                 barrier.wait()
-                return index.write_doc("owner.md", content, expected_hash)
+                return index.write_doc("owner.md", content)
 
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(write, ["version two-a", "version two-b"]))
@@ -1121,16 +1119,15 @@ class WikiPathSafetyTests(unittest.TestCase):
             final = index.read_doc("owner.md")
             self.assertIn(final["content"], {"version two-a", "version two-b"})
 
-    def test_replacing_existing_note_requires_expected_hash(self) -> None:
+    def test_replacing_existing_note_is_allowed_without_hash(self) -> None:
         with TemporaryDirectory() as tmpdir:
             index, _ = self.make_index(Path(tmpdir))
             created = index.write_doc("owner.md", "original")
 
-            conflict = index.write_doc("owner.md", "unsafe replacement")
+            replacement = index.write_doc("owner.md", "unsafe replacement")
 
-            self.assertEqual(conflict["reason"], "expected_hash_required")
-            self.assertEqual(conflict["current_hash"], created["content_hash"])
-            self.assertEqual(index.read_doc("owner.md")["content"], "original")
+            self.assertEqual(replacement["status"], "ok")
+            self.assertEqual(index.read_doc("owner.md")["content"], "unsafe replacement")
 
     def test_interrupted_note_replace_leaves_original_and_no_temporary_file(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1139,7 +1136,7 @@ class WikiPathSafetyTests(unittest.TestCase):
 
             with patch("kb_service.atomic_io.os.replace", side_effect=OSError("simulated interruption")):
                 with self.assertRaises(OSError):
-                    index.write_doc("owner.md", "partial replacement", created["content_hash"])
+                    index.write_doc("owner.md", "partial replacement")
 
             self.assertEqual(index.read_doc("owner.md")["content"], "original")
             self.assertEqual(list(wiki_root.glob(".owner.md.*.tmp")), [])
@@ -1211,19 +1208,19 @@ class WikiPathSafetyTests(unittest.TestCase):
             source = index.write_doc("owner.md", "# Owner\n")
             referring = index.write_doc("map.md", "See [[owner#Contract|the owner contract]].\n")
 
-            conflict = index.rename_doc("owner.md", "archive/owner.md", source["content_hash"])
+            conflict = index.rename_doc("owner.md", "archive/owner.md")
             self.assertEqual(conflict["reason"], "inbound_links_exist")
             self.assertEqual(conflict["inbound_links"], ["map.md"])
 
-            updated_map = index.write_doc("map.md", "No inbound link.\n", referring["content_hash"])
+            updated_map = index.write_doc("map.md", "No inbound link.\n")
             self.assertEqual(updated_map["status"], "ok")
-            renamed = index.rename_doc("owner.md", "archive/owner.md", source["content_hash"])
+            renamed = index.rename_doc("owner.md", "archive/owner.md")
             self.assertEqual(renamed["status"], "ok")
             self.assertEqual(index.read_doc("archive/owner.md")["content"], "# Owner\n")
             with self.assertRaises(FileNotFoundError):
                 index.read_doc("owner.md")
 
-    def test_delete_requires_current_hash_and_removes_index_records_on_reindex(self) -> None:
+    def test_delete_removes_index_records_on_reindex(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             wiki_root = root / "wiki"
@@ -1239,9 +1236,7 @@ class WikiPathSafetyTests(unittest.TestCase):
             created = index.write_doc("owner.md", "# Owner\n\nOwner details.\n")
             index.reindex()
 
-            stale = index.delete_doc("owner.md", "stale-hash")
-            self.assertEqual(stale["reason"], "hash_mismatch")
-            deleted = index.delete_doc("owner.md", created["content_hash"])
+            deleted = index.delete_doc("owner.md")
             result = index.reindex()
 
             self.assertEqual(deleted["status"], "ok")

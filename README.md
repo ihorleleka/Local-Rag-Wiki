@@ -103,8 +103,8 @@ container persists independently of individual agent clients.
 - [kb-service/](./kb-service) is the Dockerized MCP knowledge service the runner
   launches per repository. It serves `wiki_search`, `wiki_read`, `wiki_list`,
   `wiki_tree`, `wiki_schema_report`, `wiki_write`, `wiki_capture`, `wiki_delete`,
-  and `wiki_rename` over `POST /mcp/` (loopback by default), with hash-protected
-  writes. `wiki_search` supports tiered retrieval (`depth=abstract|packet`) plus
+  and `wiki_rename` over `POST /mcp/` (loopback by default), with atomic whole-note
+writes. `wiki_search` supports tiered retrieval (`depth=abstract|packet`) plus
   `path_prefix` directory scoping.
 
 ## Versioning
