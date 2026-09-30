@@ -389,12 +389,8 @@ class KnowledgeIndex:
         self.client = chromadb.PersistentClient(path=str(self.settings.kb_root / "chroma"))
         self.collection = self.client.get_or_create_collection("wiki_chunks", metadata={"hnsw:space": "cosine"})
         self.provider = OnnxMiniLmProvider(settings.embedding_model)
-        # Index mutations are serialized independently from document writes.
-        # Embedding a reindex can take seconds; holding this lock while doing so
-        # used to make wiki_write/delete/rename wait behind the whole reindex.
-        self._write_lock = threading.RLock()
-        self._document_lock = threading.RLock()
-        self._lexical_lock = threading.RLock()
+        # Document writes use atomic filesystem operations and indexing is
+        # asynchronous; MCP calls do not wait on process-wide locks.
         self._lexical_cache: dict[str, Any] | None = None
         self.reranker = load_reranker(settings)
 
@@ -957,15 +953,12 @@ class KnowledgeIndex:
         cancel_event: threading.Event | None = None,
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> dict[str, int]:
-        # Serialize Chroma mutations and manifest writes. Document mutations use
-        # a separate lock so an embedding pass cannot make MCP writes wait; the
-        # atomic document operations let a concurrent reindex observe either the
-        # old or new complete file and a queued targeted pass catches it up.
-        with self._write_lock:
-            return self._reindex_unlocked(
-                cancel_event=cancel_event,
-                progress_callback=progress_callback,
-            )
+        # The coordinator owns reindex scheduling; this operation itself does
+        # not hold a lock while scanning, embedding, or updating Chroma.
+        return self._reindex_unlocked(
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
 
     def reindex_paths(
         self,
@@ -975,58 +968,57 @@ class KnowledgeIndex:
         progress_callback: Callable[[int, int], None] | None = None,
     ) -> dict[str, int]:
         normalized = {path.replace("\\", "/") for path in rel_paths}
-        with self._write_lock:
-            manifest = self._read_manifest()
-            files = manifest.get("files", {})
-            # Older manifests do not contain enough dependency information for
-            # a safe targeted update. A note used as evidence by another note
-            # also requires a full pass so its trust state is refreshed.
-            if any("evidence_items" not in record for record in files.values()):
+        manifest = self._read_manifest()
+        files = manifest.get("files", {})
+        # Older manifests do not contain enough dependency information for
+        # a safe targeted update. A note used as evidence by another note
+        # also requires a full pass so its trust state is refreshed.
+        if any("evidence_items" not in record for record in files.values()):
+            return self._reindex_unlocked(
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+        repository_root = getattr(
+            self.settings,
+            "repository_root",
+            self.settings.wiki_root.parent,
+        ).resolve()
+        try:
+            wiki_prefix = self.settings.wiki_root.resolve().relative_to(repository_root).as_posix()
+        except ValueError:
+            wiki_prefix = self.settings.wiki_root.name
+        changed_targets = normalized | {
+            f"{wiki_prefix}/{path}" for path in normalized
+        }
+        for owner, record in files.items():
+            if owner in normalized:
+                continue
+            evidence_snapshot = record.get("evidence_snapshot", {})
+            dependency_hit = False
+            for anchor in evidence_snapshot.values():
+                target = str(anchor.get("target", "")).replace("\\", "/").rstrip("/")
+                kind = str(anchor.get("kind", "path"))
+                if kind == "glob":
+                    dependency_hit = any(fnmatch.fnmatch(path, target) for path in changed_targets)
+                elif kind == "dir":
+                    dependency_hit = any(
+                        path == target or path.startswith(f"{target}/")
+                        for path in changed_targets
+                    )
+                else:
+                    dependency_hit = target in changed_targets
+                if dependency_hit:
+                    break
+            if dependency_hit:
                 return self._reindex_unlocked(
                     cancel_event=cancel_event,
                     progress_callback=progress_callback,
                 )
-            repository_root = getattr(
-                self.settings,
-                "repository_root",
-                self.settings.wiki_root.parent,
-            ).resolve()
-            try:
-                wiki_prefix = self.settings.wiki_root.resolve().relative_to(repository_root).as_posix()
-            except ValueError:
-                wiki_prefix = self.settings.wiki_root.name
-            changed_targets = normalized | {
-                f"{wiki_prefix}/{path}" for path in normalized
-            }
-            for owner, record in files.items():
-                if owner in normalized:
-                    continue
-                evidence_snapshot = record.get("evidence_snapshot", {})
-                dependency_hit = False
-                for anchor in evidence_snapshot.values():
-                    target = str(anchor.get("target", "")).replace("\\", "/").rstrip("/")
-                    kind = str(anchor.get("kind", "path"))
-                    if kind == "glob":
-                        dependency_hit = any(fnmatch.fnmatch(path, target) for path in changed_targets)
-                    elif kind == "dir":
-                        dependency_hit = any(
-                            path == target or path.startswith(f"{target}/")
-                            for path in changed_targets
-                        )
-                    else:
-                        dependency_hit = target in changed_targets
-                    if dependency_hit:
-                        break
-                if dependency_hit:
-                    return self._reindex_unlocked(
-                        cancel_event=cancel_event,
-                        progress_callback=progress_callback,
-                    )
-            return self._reindex_unlocked(
-                target_paths=normalized,
-                cancel_event=cancel_event,
-                progress_callback=progress_callback,
-            )
+        return self._reindex_unlocked(
+            target_paths=normalized,
+            cancel_event=cancel_event,
+            progress_callback=progress_callback,
+        )
 
     def _reindex_unlocked(
         self,
@@ -1210,8 +1202,7 @@ class KnowledgeIndex:
         self._write_manifest(manifest)
         # The lexical BM25 index is derived from the collection; drop the cache so
         # the next search rebuilds it in lockstep with the vector store.
-        with self._lexical_lock:
-            self._lexical_cache = None
+        self._lexical_cache = None
         return {
             "changed": changed,
             "removed": removed,
@@ -1366,35 +1357,34 @@ class KnowledgeIndex:
         return reordered + tail
 
     def _ensure_lexical_index(self) -> dict[str, Any]:
-        with self._lexical_lock:
-            if self._lexical_cache is not None:
-                return self._lexical_cache
-            try:
-                fetched = self.collection.get(include=["documents", "metadatas"])
-            except Exception:
-                fetched = {}
-            ids = fetched.get("ids", []) or []
-            docs = fetched.get("documents", []) or []
-            metas = fetched.get("metadatas", []) or []
-            documents: list[tuple[str, str]] = []
-            meta_map: dict[str, dict[str, Any]] = {}
-            doc_map: dict[str, str] = {}
-            for position, doc_id in enumerate(ids):
-                text = docs[position] if position < len(docs) else ""
-                meta = metas[position] if position < len(metas) else {}
-                if not isinstance(meta, dict):
-                    meta = {}
-                text = text or ""
-                documents.append((doc_id, text))
-                meta_map[doc_id] = meta
-                doc_map[doc_id] = text
-            cache = {
-                "bm25": BM25Index.build(documents),
-                "meta": meta_map,
-                "doc": doc_map,
-            }
-            self._lexical_cache = cache
-            return cache
+        if self._lexical_cache is not None:
+            return self._lexical_cache
+        try:
+            fetched = self.collection.get(include=["documents", "metadatas"])
+        except Exception:
+            fetched = {}
+        ids = fetched.get("ids", []) or []
+        docs = fetched.get("documents", []) or []
+        metas = fetched.get("metadatas", []) or []
+        documents: list[tuple[str, str]] = []
+        meta_map: dict[str, dict[str, Any]] = {}
+        doc_map: dict[str, str] = {}
+        for position, doc_id in enumerate(ids):
+            text = docs[position] if position < len(docs) else ""
+            meta = metas[position] if position < len(metas) else {}
+            if not isinstance(meta, dict):
+                meta = {}
+            text = text or ""
+            documents.append((doc_id, text))
+            meta_map[doc_id] = meta
+            doc_map[doc_id] = text
+        cache = {
+            "bm25": BM25Index.build(documents),
+            "meta": meta_map,
+            "doc": doc_map,
+        }
+        self._lexical_cache = cache
+        return cache
 
     def _lexical_search(
         self,
@@ -1922,32 +1912,31 @@ class KnowledgeIndex:
         expected_hash: str | None = None,
     ) -> dict[str, Any]:
         target = self._resolve_wiki_markdown_path(rel_path)
-        with self._document_lock:
-            current_content = target.read_text(encoding="utf-8") if target.exists() else None
-            current_hash = sha256_text(current_content) if current_content is not None else None
-            if current_content is not None and expected_hash is None:
-                return {
-                    "status": "conflict",
-                    "reason": "expected_hash_required",
-                    "path": rel_path.replace("\\", "/"),
-                    "current_hash": current_hash,
-                }
-            if expected_hash is not None and expected_hash != current_hash:
-                return {
-                    "status": "conflict",
-                    "reason": "hash_mismatch",
-                    "path": rel_path.replace("\\", "/"),
-                    "expected_hash": expected_hash,
-                    "current_hash": current_hash,
-                }
-
-            atomic_write_text(target, content)
+        current_content = target.read_text(encoding="utf-8") if target.exists() else None
+        current_hash = sha256_text(current_content) if current_content is not None else None
+        if current_content is not None and expected_hash is None:
             return {
-                "status": "ok",
-                "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
-                "previous_hash": current_hash,
-                "content_hash": sha256_text(content),
+                "status": "conflict",
+                "reason": "expected_hash_required",
+                "path": rel_path.replace("\\", "/"),
+                "current_hash": current_hash,
             }
+        if expected_hash is not None and expected_hash != current_hash:
+            return {
+                "status": "conflict",
+                "reason": "hash_mismatch",
+                "path": rel_path.replace("\\", "/"),
+                "expected_hash": expected_hash,
+                "current_hash": current_hash,
+            }
+
+        atomic_write_text(target, content)
+        return {
+            "status": "ok",
+            "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
+            "previous_hash": current_hash,
+            "content_hash": sha256_text(content),
+        }
 
     @staticmethod
     def _link_targets_path(link: str, rel_path: str) -> bool:
@@ -1972,39 +1961,38 @@ class KnowledgeIndex:
 
     def delete_doc(self, rel_path: str, expected_hash: str) -> dict[str, Any]:
         target = self._resolve_wiki_markdown_path(rel_path)
-        with self._document_lock:
-            if not target.exists():
-                return {
-                    "status": "conflict",
-                    "reason": "not_found",
-                    "path": rel_path.replace("\\", "/"),
-                    "current_hash": None,
-                }
-            current_content = target.read_text(encoding="utf-8")
-            current_hash = sha256_text(current_content)
-            if expected_hash != current_hash:
-                return {
-                    "status": "conflict",
-                    "reason": "hash_mismatch",
-                    "path": rel_path.replace("\\", "/"),
-                    "expected_hash": expected_hash,
-                    "current_hash": current_hash,
-                }
-            inbound_links = self._inbound_links(rel_path)
-            if inbound_links:
-                return {
-                    "status": "conflict",
-                    "reason": "inbound_links_exist",
-                    "path": rel_path.replace("\\", "/"),
-                    "current_hash": current_hash,
-                    "inbound_links": inbound_links,
-                }
-            target.unlink()
+        if not target.exists():
             return {
-                "status": "ok",
+                "status": "conflict",
+                "reason": "not_found",
                 "path": rel_path.replace("\\", "/"),
-                "deleted_hash": current_hash,
+                "current_hash": None,
             }
+        current_content = target.read_text(encoding="utf-8")
+        current_hash = sha256_text(current_content)
+        if expected_hash != current_hash:
+            return {
+                "status": "conflict",
+                "reason": "hash_mismatch",
+                "path": rel_path.replace("\\", "/"),
+                "expected_hash": expected_hash,
+                "current_hash": current_hash,
+            }
+        inbound_links = self._inbound_links(rel_path)
+        if inbound_links:
+            return {
+                "status": "conflict",
+                "reason": "inbound_links_exist",
+                "path": rel_path.replace("\\", "/"),
+                "current_hash": current_hash,
+                "inbound_links": inbound_links,
+            }
+        target.unlink()
+        return {
+            "status": "ok",
+            "path": rel_path.replace("\\", "/"),
+            "deleted_hash": current_hash,
+        }
 
     def rename_doc(
         self,
@@ -2014,48 +2002,47 @@ class KnowledgeIndex:
     ) -> dict[str, Any]:
         source = self._resolve_wiki_markdown_path(source_path)
         destination = self._resolve_wiki_markdown_path(destination_path)
-        with self._document_lock:
-            if not source.exists():
-                return {
-                    "status": "conflict",
-                    "reason": "not_found",
-                    "source_path": source_path.replace("\\", "/"),
-                    "current_hash": None,
-                }
-            current_content = source.read_text(encoding="utf-8")
-            current_hash = sha256_text(current_content)
-            if expected_hash != current_hash:
-                return {
-                    "status": "conflict",
-                    "reason": "hash_mismatch",
-                    "source_path": source_path.replace("\\", "/"),
-                    "expected_hash": expected_hash,
-                    "current_hash": current_hash,
-                }
-            if destination.exists():
-                destination_content = destination.read_text(encoding="utf-8")
-                return {
-                    "status": "conflict",
-                    "reason": "destination_exists",
-                    "source_path": source_path.replace("\\", "/"),
-                    "destination_path": destination_path.replace("\\", "/"),
-                    "destination_hash": sha256_text(destination_content),
-                }
-            inbound_links = self._inbound_links(source_path)
-            if inbound_links:
-                return {
-                    "status": "conflict",
-                    "reason": "inbound_links_exist",
-                    "source_path": source_path.replace("\\", "/"),
-                    "current_hash": current_hash,
-                    "inbound_links": inbound_links,
-                }
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            os.replace(source, destination)
+        if not source.exists():
             return {
-                "status": "ok",
+                "status": "conflict",
+                "reason": "not_found",
                 "source_path": source_path.replace("\\", "/"),
-                "destination_path": destination.relative_to(self.settings.wiki_root.resolve()).as_posix(),
-                "content_hash": current_hash,
+                "current_hash": None,
             }
+        current_content = source.read_text(encoding="utf-8")
+        current_hash = sha256_text(current_content)
+        if expected_hash != current_hash:
+            return {
+                "status": "conflict",
+                "reason": "hash_mismatch",
+                "source_path": source_path.replace("\\", "/"),
+                "expected_hash": expected_hash,
+                "current_hash": current_hash,
+            }
+        if destination.exists():
+            destination_content = destination.read_text(encoding="utf-8")
+            return {
+                "status": "conflict",
+                "reason": "destination_exists",
+                "source_path": source_path.replace("\\", "/"),
+                "destination_path": destination_path.replace("\\", "/"),
+                "destination_hash": sha256_text(destination_content),
+            }
+        inbound_links = self._inbound_links(source_path)
+        if inbound_links:
+            return {
+                "status": "conflict",
+                "reason": "inbound_links_exist",
+                "source_path": source_path.replace("\\", "/"),
+                "current_hash": current_hash,
+                "inbound_links": inbound_links,
+            }
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(source, destination)
+        return {
+            "status": "ok",
+            "source_path": source_path.replace("\\", "/"),
+            "destination_path": destination.relative_to(self.settings.wiki_root.resolve()).as_posix(),
+            "content_hash": current_hash,
+        }
 

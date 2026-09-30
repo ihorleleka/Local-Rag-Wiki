@@ -371,11 +371,9 @@ def create_app():
         async with mcp_app.lifespan(app):
             mcp_runtime["running"] = True
             coordinator.start()
+            # Indexing is best-effort background work; MCP becomes available
+            # immediately instead of waiting on startup scans or embeddings.
             startup_task = asyncio.create_task(startup_reindex_loop())
-            try:
-                await asyncio.wait_for(asyncio.shield(startup_task), timeout=settings.startup_reindex_timeout_seconds)
-            except asyncio.TimeoutError:
-                pass
             if settings.watch_interval_seconds > 0:
                 watcher_task = asyncio.create_task(watcher_loop())
             try:
@@ -515,15 +513,9 @@ def create_app():
 
     @mcp.tool()
     async def wiki_schema_report():
-        """Report typed note schema health, packet gaps, stale verification, oversized notes, duplicate ids, and broken wiki links. Returns a prompt retryable status while indexing or when a full audit exceeds its time budget."""
-        index_state = coordinator.snapshot()
-        if index_state["indexing_state"] in {"starting", "indexing"}:
-            return {
-                "status": "indexing",
-                "retry_after_seconds": 5,
-                "message": "The wiki index is still being built; retry the schema audit after indexing completes.",
-                "index": index_state,
-            }
+        """Report typed note schema health, packet gaps, stale verification, oversized notes, duplicate ids, and broken wiki links. Returns a time-bounded result when a full audit exceeds its time budget."""
+        # Audit the filesystem directly even while indexing. Results are
+        # intentionally eventually consistent with search, but remain useful.
         timeout_seconds = max(1, int(getattr(settings, "schema_report_timeout_seconds", 10)))
         try:
             return await asyncio.wait_for(

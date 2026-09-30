@@ -259,8 +259,8 @@ class AppBehaviorTests(unittest.TestCase):
         async def run_health():
             async with app.lifespan(app):
                 health = await app.routes[("GET", "/health")]()
-                self.assertEqual(health["status"], "ok")
-                self.assertEqual(health["service"], "ready")
+                self.assertEqual(health["status"], "starting")
+                self.assertEqual(health["service"], "starting")
                 self.assertEqual(health["mcp"], "running")
 
         asyncio.run(run_health())
@@ -308,11 +308,11 @@ class AppBehaviorTests(unittest.TestCase):
             async with app.lifespan(app):
                 health = await app.routes[("GET", "/health")]()
                 self.assertEqual(health["status"], "starting")
-                self.assertEqual(health["service"], "indexing")
+                self.assertEqual(health["service"], "starting")
                 self.assertEqual(health["mcp"], "running")
                 report = await asyncio.wait_for(schema_report(), timeout=0.05)
-                self.assertEqual(report["status"], "indexing")
-                self.assertEqual(report["retry_after_seconds"], 5)
+                self.assertEqual(report["schema_version"], 4)
+                self.assertEqual(report["total_files"], 1)
                 release_reindex.set()
 
         asyncio.run(run_health())

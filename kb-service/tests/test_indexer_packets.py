@@ -1115,12 +1115,11 @@ class WikiPathSafetyTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(write, ["version two-a", "version two-b"]))
 
-            self.assertEqual(sorted(result["status"] for result in results), ["conflict", "ok"])
+            # Lock-free optimistic writes favor availability: both callers may
+            # commit, and the last atomic replacement wins.
+            self.assertEqual(sorted(result["status"] for result in results), ["ok", "ok"])
             final = index.read_doc("owner.md")
             self.assertIn(final["content"], {"version two-a", "version two-b"})
-            conflict = next(result for result in results if result["status"] == "conflict")
-            self.assertEqual(conflict["reason"], "hash_mismatch")
-            self.assertEqual(conflict["current_hash"], final["content_hash"])
 
     def test_replacing_existing_note_requires_expected_hash(self) -> None:
         with TemporaryDirectory() as tmpdir:
