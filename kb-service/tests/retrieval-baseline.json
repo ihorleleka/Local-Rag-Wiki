@@ -3,7 +3,7 @@
   "measured_utc": "2026-08-23",
   "service_version": "0.1.1",
   "index_schema_version": 7,
-  "mcp_tool_contract_version": 5,
+  "mcp_tool_contract_version": 6,
   "embedding_model": "all-MiniLM-L6-v2",
   "embedding_runtime": "onnxruntime (ChromaDB-bundled)",
   "minimum_relevance": 0.35,

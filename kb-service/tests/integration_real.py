@@ -160,7 +160,7 @@ class RealChromaIntegrationTests(unittest.TestCase):
                 self.assertEqual(health.json()["status"], "ok")
                 version = client.get("/version").json()
                 self.assertEqual(version["index_schema_version"], 7)
-                self.assertEqual(version["mcp_tool_contract_version"], 5)
+                self.assertEqual(version["mcp_tool_contract_version"], 6)
                 self.assertTrue(any(route.path.startswith("/mcp") for route in client.app.routes))
 
 

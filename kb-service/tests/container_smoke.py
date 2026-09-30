@@ -44,7 +44,7 @@ def main() -> None:
     version = decode_response(connection.getresponse())
     connection.close()
     assert version["index_schema_version"] == 7, version
-    assert version["mcp_tool_contract_version"] == 5, version
+    assert version["mcp_tool_contract_version"] == 6, version
 
     initialized, session = post(
         port,
