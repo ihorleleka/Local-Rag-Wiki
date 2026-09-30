@@ -392,7 +392,18 @@ class KnowledgeIndex:
         # Document writes use atomic filesystem operations and indexing is
         # asynchronous; MCP calls do not wait on process-wide locks.
         self._lexical_cache: dict[str, Any] | None = None
+        self._evidence_inspector: EvidenceInspector | None = None
         self.reranker = load_reranker(settings)
+
+    def _get_evidence_inspector(self) -> EvidenceInspector:
+        if self._evidence_inspector is None:
+            self._evidence_inspector = EvidenceInspector(
+                getattr(self.settings, "repository_root", self.settings.wiki_root.parent),
+                int(getattr(self.settings, "evidence_max_anchors", 12)),
+                getattr(self.settings, "repository_root", self.settings.wiki_root.parent)
+                / self.settings.wiki_root.name,
+            )
+        return self._evidence_inspector
 
     def _read_manifest(self) -> dict[str, Any]:
         if not self.manifest_path.exists():
@@ -759,12 +770,7 @@ class KnowledgeIndex:
         id_counts: dict[str, int] = {}
         max_note_lines = max(1, int(getattr(self.settings, "note_max_lines", DEFAULT_NOTE_MAX_LINES)))
 
-        evidence_inspector = EvidenceInspector(
-            getattr(self.settings, "repository_root", self.settings.wiki_root.parent),
-            int(getattr(self.settings, "evidence_max_anchors", 12)),
-            getattr(self.settings, "repository_root", self.settings.wiki_root.parent)
-            / self.settings.wiki_root.name,
-        )
+        evidence_inspector = self._get_evidence_inspector()
         for rel_path in relative_md_paths(self.settings.wiki_root):
             rel = str(rel_path).replace("\\", "/")
             raw = (self.settings.wiki_root / rel_path).read_text(encoding="utf-8")
@@ -1032,12 +1038,7 @@ class KnowledgeIndex:
         current: dict[str, Any] = dict(prev) if target_paths is not None else {}
         changed = 0
         removed = 0
-        evidence_inspector = EvidenceInspector(
-            getattr(self.settings, "repository_root", self.settings.wiki_root.parent),
-            int(getattr(self.settings, "evidence_max_anchors", 12)),
-            getattr(self.settings, "repository_root", self.settings.wiki_root.parent)
-            / self.settings.wiki_root.name,
-        )
+        evidence_inspector = self._get_evidence_inspector()
 
         all_paths = [str(path).replace("\\", "/") for path in relative_md_paths(self.settings.wiki_root)]
         indexed_paths = set(all_paths)
