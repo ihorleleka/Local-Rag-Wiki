@@ -3,6 +3,7 @@
 const { spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
+const YAML = require("yaml");
 
 const ROOT = path.resolve(__dirname, "..");
 const ARTIFACTS_ROOT = path.join(ROOT, ".artifacts");
@@ -10,7 +11,6 @@ const DEFAULT_SMOKE_ROOT = path.join(ARTIFACTS_ROOT, "verify-smoke-default");
 const CUSTOM_SMOKE_ROOT = path.join(ARTIFACTS_ROOT, "verify-smoke-custom");
 const DEFAULT_PACKAGE_SOURCE = "github:ihorleleka/Local-Rag-Wiki";
 const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
-const DSH_BUNDLE_ROOT = path.join(ROOT, "packages", "dsh-local-rag-wiki");
 const PACKAGE_METADATA = require(path.join(ROOT, "package.json"));
 const {
   DEFAULT_IMAGE,
@@ -64,6 +64,9 @@ function expectFailure(command, args, expectedMessage, options = {}) {
     ...options,
   });
 
+  if (result.error || result.status === null) {
+    fail(`${command} could not run: ${result.error?.message || result.signal}`);
+  }
   if (result.status === 0) {
     fail(`${command} ${args.join(" ")} succeeded unexpectedly`);
   }
@@ -92,6 +95,8 @@ function runNpm(args) {
 }
 
 function prepareScratch(dir) {
+  const relative = path.relative(ARTIFACTS_ROOT, path.resolve(dir));
+  assert(relative && !relative.startsWith("..") && !path.isAbsolute(relative), "scratch directory must be inside .artifacts");
   fs.rmSync(dir, { recursive: true, force: true });
   fs.mkdirSync(dir, { recursive: true });
 }
@@ -138,56 +143,6 @@ function readJson(file) {
   return JSON.parse(stripped.replace(/,\s*([}\]])/g, "$1"));
 }
 
-function collectJsonStrings(value, output = []) {
-  if (typeof value === "string") {
-    output.push(value);
-    return output;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) collectJsonStrings(item, output);
-    return output;
-  }
-  if (value && typeof value === "object") {
-    for (const item of Object.values(value)) collectJsonStrings(item, output);
-  }
-  return output;
-}
-
-function collectTomlStrings(file) {
-  const content = fs.readFileSync(file, "utf8");
-  return [...content.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
-}
-
-function assertReferencedJsTargetsExist(targetRoot, agentsDir) {
-  const configFiles = [
-    [".claude/settings.local.json", collectJsonStrings(readJson(path.join(targetRoot, ".claude", "settings.local.json")))],
-    [".vscode/mcp.json", collectJsonStrings(readJson(path.join(targetRoot, ".vscode", "mcp.json")))],
-    ["opencode.jsonc", collectJsonStrings(readJson(path.join(targetRoot, "opencode.jsonc")))],
-    [".codex/config.toml", collectTomlStrings(path.join(targetRoot, ".codex", "config.toml"))],
-  ];
-
-  const expectedSegment = `${agentsDir.replace(/\\/g, "/")}/`;
-  for (const [configFile, strings] of configFiles) {
-    const jsTargets = strings.filter((value) => {
-      const portable = value.replace(/\\/g, "/");
-      // Accept both bare-relative (`<agentsDir>/...`) and workspace-prefixed
-      // (`${workspaceFolder}/<agentsDir>/...`) forms.
-      const segment = portable.startsWith(expectedSegment)
-        ? portable
-        : portable.replace(/^\$\{[^}]+\}\//, "");
-      return segment.startsWith(expectedSegment) && portable.endsWith(".js");
-    });
-    assert(jsTargets.length > 0, `${configFile} does not reference a ${expectedSegment}*.js MCP runner`);
-
-    for (const jsTarget of jsTargets) {
-      // Strip any leading `${...}/` placeholder before resolving to disk.
-      const resolvable = jsTarget.replace(/^\$\{[^}]+\}\//, "");
-      const resolved = path.join(targetRoot, resolvable);
-      assert(fs.existsSync(resolved), `${configFile} references missing file: ${jsTarget}`);
-    }
-  }
-}
-
 function assertDeliveredSurface(targetRoot, agentsDir) {
   const consumerAgentsPath = path.join(targetRoot, "AGENTS.md");
   const wikiSkillPath = path.join(targetRoot, agentsDir, "skills", "wiki", "SKILL.md");
@@ -202,39 +157,28 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   const dshMcpClientPath = path.join(targetRoot, ".dsh", ".dsh-mcp-client.js");
   const dshModulePath = path.join(targetRoot, ".dsh", "package.json");
   assert(fs.existsSync(consumerAgentsPath), "consumer AGENTS.md missing");
-  assert(fs.existsSync(wikiSkillPath), "managed wiki skill missing");
+  for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
+    const deliveredPath = path.join(path.dirname(wikiSkillPath), relativePath);
+    assert(fs.existsSync(deliveredPath), `wiki guidance missing: ${relativePath}`);
+    const actual = fs.readFileSync(deliveredPath, "utf8");
+    assert(actual.trim(), `wiki guidance is empty: ${relativePath}`);
+    for (const match of actual.matchAll(/\[[^\]]+\]\(([^)]+\.md)(?:#[^)]*)?\)/g)) {
+      assert(
+        fs.existsSync(path.resolve(path.dirname(deliveredPath), match[1])),
+        `wiki guidance references missing file: ${match[1]}`
+      );
+    }
+  }
   assert(fs.existsSync(integrationManifestPath), "integration manifest missing");
   assert(fs.existsSync(marketplacePath), "plugin marketplace metadata missing");
   assert(fs.existsSync(dshMcpPath), "DeepSeek Harness MCP configuration missing");
   assert(fs.existsSync(dshMcpClientPath), "agent-scoped DSH MCP client missing from .dsh");
   assert(!fs.existsSync(path.join(targetRoot, ".dsh-mcp-client.js")), "DSH MCP client leaked into repository root");
   assert(readJson(dshModulePath).type === "module", ".dsh MCP client is not in an ESM package scope");
-  const dshMcp = fs.readFileSync(dshMcpPath, "utf8");
-  assert(dshMcp.includes("wiki-manager:"), "DSH wiki-manager entry missing");
-  assert(dshMcp.includes(`args: [\"${agentsDir}/run-wiki-manager.mcp.js\"]`), "DSH runner path is incorrect");
-
-}
-
-function assertDshBundleSource() {
-  const source = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "index.mjs"), "utf8");
-  assert(
-    source.includes("|| agentOrSession?.session?.cwd") && source.includes("|| agentOrSession?.cwd"),
-    "DSH bundle does not retain legacy workspace cwd compatibility"
-  );
-  assert(source.includes("loadWorkspaceWikiMcp(workspace)"), "DSH bundle does not load workspace mcp.servers.yml");
-  assert(source.includes("agent.ctx.plugin(mcpClient"), "DSH bundle does not mount MCP through the agent scope");
-  assert(source.includes("subprocess.resolveExecutable(discovered.server.command"), "DSH bundle does not resolve the configured Node executable through DSH");
-  assert(!source.includes("process.execPath"), "DSH bundle would launch the runner through Electron process.execPath");
-  assert(source.includes("ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))"), "DSH bundle does not mount on agent creation");
-  assert(source.includes("ctx.on('agent/session-start', ({ agent }) => mountWikiMcp(agent))"), "DSH bundle does not retry mounting at session start");
-  assert(source.includes("const existing = mcpReady.get(agent.id)"), "DSH bundle does not deduplicate lifecycle mounts");
-  assert(source.includes("if (ready) await ready"), "DSH bundle does not await MCP discovery before model tool projection");
-  assert(source.includes("tools.execute({"), "DSH recall does not dispatch through the native tool registry");
-  assert(!source.includes("updateState"), "DSH lifecycle still uses local prompt-history state");
-  assert(!fs.existsSync(path.join(DSH_BUNDLE_ROOT, "state.mjs")), "obsolete DSH prompt-history module still ships");
-  run(process.execPath, ["--check", path.join(DSH_BUNDLE_ROOT, "index.mjs")]);
-  run(process.execPath, ["--check", path.join(DSH_BUNDLE_ROOT, "workspace-mcp.mjs")]);
-  run(process.execPath, ["--check", path.join(ROOT, "templates", "root", ".dsh", ".dsh-mcp-client.js")]);
+  const dshServer = YAML.parse(fs.readFileSync(dshMcpPath, "utf8")).servers?.["wiki-manager"];
+  assert(dshServer?.command === "node", "DSH wiki-manager command is incorrect");
+  assert(dshServer?.args?.[0] === `${agentsDir}/run-wiki-manager.mcp.js`, "DSH runner path is incorrect");
+  assert(fs.existsSync(path.join(targetRoot, dshServer.args[0])), "installed MCP runner is missing");
 }
 
 function assertRepositoryUniqueResourceNames() {
@@ -273,7 +217,7 @@ function assertRepositoryUniqueResourceNames() {
 }
 
 function assertInstall(targetRoot, agentsDir, expectedPackageSource = null) {
-  const packageJson = readJson(path.join(ROOT, "package.json"));
+  const packageJson = PACKAGE_METADATA;
   const marker = readJson(path.join(targetRoot, agentsDir, ".wiki-kit-install.json"));
 
   const expectedSource = expectedPackageSource || DEFAULT_PACKAGE_SOURCE;
@@ -284,60 +228,10 @@ function assertInstall(targetRoot, agentsDir, expectedPackageSource = null) {
   assert(marker.defaultImage === DEFAULT_IMAGE, "install marker does not record the pinned image");
   assert(Boolean(marker.containerName), "install marker does not record the repository container name");
 
-  assertReferencedJsTargetsExist(targetRoot, agentsDir);
   assertDeliveredSurface(targetRoot, agentsDir);
 
-  const codexConfig = fs.readFileSync(path.join(targetRoot, ".codex", "config.toml"), "utf8");
-  assert(codexConfig.includes("startup_timeout_sec = 75.0"), "Codex startup timeout is missing");
-  assert(codexConfig.includes("tool_timeout_sec = 120.0"), "Codex tool timeout is missing");
-  const opencodeConfig = readJson(path.join(targetRoot, "opencode.jsonc"));
-  assert(opencodeConfig.mcp["wiki-manager"].timeout === 75000, "OpenCode MCP timeout is missing");
-}
-
-function assertDshBundle() {
-  const manifest = readJson(path.join(ROOT, "package.json"));
-  assert(
-    manifest.dsh?.bundle?.patch === "./packages/dsh-local-rag-wiki/cordis.patch.yml",
-    "package.json does not expose the DSH bundle patch"
-  );
-  assert(manifest.main === "./packages/dsh-local-rag-wiki/index.mjs", "package.json does not declare the DSH entry artifact");
-  assert(manifest.exports?.["."] === "./packages/dsh-local-rag-wiki/index.mjs", "package.json does not export the DSH entry artifact");
-  assert(
-    manifest.exports?.["./dsh"] === "./packages/dsh-local-rag-wiki/index.mjs",
-    "package.json does not export the DSH lifecycle plugin"
-  );
-  assert(
-    manifest.exports?.["./dsh-mcp-client"] === "./templates/root/.dsh/.dsh-mcp-client.js",
-    "package.json does not export the scoped DSH MCP client"
-  );
-  assert(
-    manifest.exports?.["./dsh-runner"] === "./packages/dsh-local-rag-wiki/workspace-runner.cjs",
-    "package.json does not export the DSH workspace runner"
-  );
-  assert(
-    manifest.files.includes("packages/dsh-local-rag-wiki/"),
-    "published package would omit the DSH bundle files"
-  );
-  const recallCoordinator = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "recall.mjs"), "utf8");
-  assert(recallCoordinator.includes("depth: 'abstract'"), "DSH recall coordinator does not request L0 abstracts");
-  assert(recallCoordinator.includes("depth: 'packet'"), "DSH recall coordinator does not request L1 packets");
-  assert(recallCoordinator.includes("inFlight"), "DSH recall coordinator lacks in-flight deduplication");
-  assert(recallCoordinator.includes("PACKET_WINDOW_MS"), "DSH recall coordinator lacks an L1 packet budget");
-  assert(!recallCoordinator.includes("spawn(") && !recallCoordinator.includes("process.execPath"), "DSH recall still launches a second MCP runner");
-  const lifecyclePlugin = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "index.mjs"), "utf8");
-  assert(lifecyclePlugin.includes("agent.ctx.plugin(mcpClient"), "DSH bundle does not mount MCP per agent workspace");
-  assert(lifecyclePlugin.includes("loadWorkspaceWikiMcp(workspace)"), "DSH bundle does not gate MCP tools through workspace config");
-  assert(lifecyclePlugin.includes("../../templates/root/.dsh/.dsh-mcp-client.js"), "DSH bundle does not use the delivered scoped MCP client");
-  const patch = fs.readFileSync(path.join(DSH_BUNDLE_ROOT, "cordis.patch.yml"), "utf8");
-  assert(patch.includes("name: '@ihorleleka/wiki-kit/dsh'"), "DSH bundle does not mount the lifecycle plugin");
-  assert(!patch.includes("@deepseek-ai/dsh-mcp-client"), "DSH bundle must not mount MCP globally outside an agent workspace");
-  const { findAgentsRoot } = require(path.join(DSH_BUNDLE_ROOT, "workspace-runner.cjs"));
-  const root = path.join(ARTIFACTS_ROOT, "dsh-bundle-marker-test");
-  prepareScratch(root);
-  const customAgentsRoot = path.join(root, "custom-wiki-kit");
-  fs.mkdirSync(customAgentsRoot, { recursive: true });
-  fs.writeFileSync(path.join(customAgentsRoot, ".wiki-kit-install.json"), "{}\n", "utf8");
-  assert(findAgentsRoot(root) === customAgentsRoot, "DSH runner did not discover custom wiki-kit installation");
+  const status = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", targetRoot]);
+  assert(status.stdout.includes("MCP configs: 5 current, 0 changed, 0 missing, 0 invalid"), "installed MCP configurations are not current");
 }
 
 function assertCompatibilityClassification() {
@@ -381,24 +275,20 @@ function assertReleaseWorkflowImageRepository() {
     path.join(ROOT, ".github", "workflows", "docker-release.yml"),
     "utf8"
   );
-  const imageNameMatch = dockerReleaseWorkflow.match(/^\s*IMAGE_NAME:\s*(\S+)\s*$/m);
-  assert(imageNameMatch, "docker-release workflow is missing IMAGE_NAME");
+  const imageName = YAML.parse(dockerReleaseWorkflow).env?.IMAGE_NAME;
   assert(
-    imageNameMatch[1] === expectedRepository,
-    `docker-release IMAGE_NAME must match pinned repository (${expectedRepository}), found ${imageNameMatch[1]}`
+    imageName === expectedRepository,
+    `docker-release IMAGE_NAME must match pinned repository (${expectedRepository}), found ${imageName}`
   );
 }
 
 function assertMergedInstall(targetRoot, agentsDir) {
   const agentsPolicy = fs.readFileSync(path.join(targetRoot, "AGENTS.md"), "utf8");
-  const wikiSkillPath = path.join(targetRoot, agentsDir, "skills", "wiki", "SKILL.md");
   assert(
     agentsPolicy.split("<!-- BEGIN WIKI-KIT MANAGED WIKI POLICY -->").length - 1 === 1 &&
       agentsPolicy.split("<!-- END WIKI-KIT MANAGED WIKI POLICY -->").length - 1 === 1,
     "managed AGENTS policy markers are missing or duplicated"
   );
-  assert(fs.statSync(wikiSkillPath).size > 0, "wiki skill was not installed");
-  assert(fs.statSync(path.join(targetRoot, agentsDir, "skills", "wiki", "references", "authoring.md")).size > 0, "wiki authoring reference was not installed");
 
   const vscodeConfig = readJson(path.join(targetRoot, ".vscode", "mcp.json"));
   assert(vscodeConfig.servers["other-wiki-kit"], "existing VS Code MCP server was not preserved");
@@ -427,10 +317,8 @@ function assertMergedInstall(targetRoot, agentsDir) {
   const opencodeText = fs.readFileSync(path.join(targetRoot, "opencode.jsonc"), "utf8");
   assert(opencodeText.includes("// Existing wiki-kit config"), "OpenCode JSONC comment was not preserved");
 
-  const vscodeMcpText = fs.readFileSync(path.join(targetRoot, ".vscode", "mcp.json"), "utf8");
-  assert(vscodeMcpText.includes('"other-wiki-kit"'), "existing VS Code MCP server text was not preserved");
   const vscodeSettingsText = fs.readFileSync(path.join(targetRoot, ".vscode", "settings.json"), "utf8");
-  const vscodeSettings = JSON.parse(vscodeSettingsText.replace(/\/\/[^\n]*/g, "").replace(/,\s*}/g, "}"));
+  const vscodeSettings = readJson(path.join(targetRoot, ".vscode", "settings.json"));
   assert(vscodeSettings["editor.wordWrap"] === "on", "unrelated VS Code setting was overwritten");
   assert(vscodeSettingsText.includes("// User-owned setting"), "VS Code settings comment was not preserved");
 
@@ -438,7 +326,8 @@ function assertMergedInstall(targetRoot, agentsDir) {
   assert(codexConfig.includes("[mcp_servers.other-wiki-kit]"), "existing Codex MCP server was not preserved");
   assert(codexConfig.includes("[mcp_servers.wiki-manager]"), "wiki-manager Codex MCP server was not merged");
 
-  assert(fs.existsSync(path.join(targetRoot, agentsDir, "skills", "custom", "SKILL.md")), "custom skill was not preserved");
+  assert(agentsPolicy.includes("Local colliding Knowledge Scope content."), "local AGENTS instructions were overwritten");
+  assert(fs.readFileSync(path.join(targetRoot, agentsDir, "skills", "custom", "SKILL.md"), "utf8") === "# Custom\n", "custom skill was overwritten");
 }
 
 function assertLegacyAgentsPolicyMigrated(targetRoot) {
@@ -448,19 +337,22 @@ function assertLegacyAgentsPolicyMigrated(targetRoot) {
   assert(agentsPolicy.split(begin).length - 1 === 1, "legacy policy migration did not produce one managed block");
   assert(agentsPolicy.split(end).length - 1 === 1, "legacy policy migration did not close one managed block");
   assert(agentsPolicy.indexOf(begin) < agentsPolicy.indexOf(end), "managed policy markers are out of order");
-  assert(agentsPolicy.trim().length > end.length, "legacy policy migration produced an empty AGENTS.md");
+  const expected = fs.readFileSync(path.join(ROOT, "templates", "root", "AGENTS.md"), "utf8").trim();
+  assert(agentsPolicy.includes(expected), "legacy migration did not install the current policy");
+  assert(agentsPolicy.includes("# Existing local instructions") && agentsPolicy.includes("# More local instructions"), "legacy migration overwrote local instructions");
 }
 
-function main() {
+function verifyContracts() {
   assert(
     PACKAGE_METADATA.version === COMPATIBILITY.wikiKitVersion,
     "package.json version must match the shared wiki-kit/service release version"
   );
-  assertDshBundle();
-  assertDshBundleSource();
   assertCompatibilityClassification();
   assertReleaseWorkflowImageRepository();
   assertRepositoryUniqueResourceNames();
+}
+
+function verifyDefaultInstall() {
   prepareScratch(DEFAULT_SMOKE_ROOT);
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", DEFAULT_SMOKE_ROOT, "--force"]);
   assertInstall(DEFAULT_SMOKE_ROOT, ".agents");
@@ -497,7 +389,9 @@ function main() {
     );
   }
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", DEFAULT_SMOKE_ROOT]);
+}
 
+function verifyMergedInstall() {
   const mergeRoot = path.join(ARTIFACTS_ROOT, "verify-smoke-merge");
   prepareScratch(mergeRoot);
   fs.mkdirSync(path.join(mergeRoot, ".agents", "skills", "custom"), { recursive: true });
@@ -595,7 +489,9 @@ function main() {
   );
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", mergeRoot]);
   assertMergedInstall(mergeRoot, ".agents");
+}
 
+function verifyDiagnostics() {
   const decoyRoot = path.join(ARTIFACTS_ROOT, "verify-smoke-mcp-decoy");
   prepareScratch(decoyRoot);
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", decoyRoot]);
@@ -618,7 +514,7 @@ function main() {
   expectFailure(
     process.execPath,
     [path.join(ROOT, "bin", "wiki-kit.js"), "doctor", decoyRoot],
-    "managed wiki-manager entries are current"
+    "[fail] managed wiki-manager entries are current"
   );
 
   fs.writeFileSync(path.join(decoyRoot, ".claude", "settings.local.json"), "{ invalid", "utf8");
@@ -627,7 +523,9 @@ function main() {
     invalidStatus.stdout.includes(".claude/settings.local.json: unreadable or invalid"),
     "status did not distinguish an unreadable MCP config"
   );
+}
 
+function verifyLegacyPolicy() {
   const legacyAgentsRoot = path.join(ARTIFACTS_ROOT, "verify-smoke-legacy-agents");
   prepareScratch(legacyAgentsRoot);
   const legacyPolicy = fs.readFileSync(path.join(ROOT, "templates", "root", "AGENTS.md"), "utf8");
@@ -642,7 +540,9 @@ function main() {
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", legacyAgentsRoot]);
   assertInstall(legacyAgentsRoot, ".agents");
   assertLegacyAgentsPolicyMigrated(legacyAgentsRoot);
+}
 
+function verifyCustomInstall() {
   prepareScratch(CUSTOM_SMOKE_ROOT);
   run(process.execPath, [
     path.join(ROOT, "bin", "wiki-kit.js"),
@@ -653,6 +553,8 @@ function main() {
     "--force",
   ]);
   assertInstall(CUSTOM_SMOKE_ROOT, "wiki-kit-agent");
+  const { findAgentsRoot } = require(path.join(ROOT, "packages", "dsh-local-rag-wiki", "workspace-runner.cjs"));
+  assert(findAgentsRoot(CUSTOM_SMOKE_ROOT) === path.join(CUSTOM_SMOKE_ROOT, "wiki-kit-agent"), "workspace runner did not discover the custom installation");
   const customStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", CUSTOM_SMOKE_ROOT]);
   assert(customStatus.stdout.includes("Agents dir: wiki-kit-agent"), "status did not discover custom agents dir");
 
@@ -663,12 +565,6 @@ function main() {
     "direct custom update without --agents-dir created a second default installation"
   );
 
-  for (const updater of ["update-wiki-kit.cmd", "update-wiki-kit.sh"]) {
-    const updaterSource = fs.readFileSync(path.join(ROOT, "templates", "root", ".agents", updater), "utf8");
-    assert(updaterSource.includes("npx --yes --legacy-peer-deps"), `${updater} must tolerate peer dependency resolution during updates`);
-    assert(updaterSource.includes("docker pull"), `${updater} must pull the configured image`);
-    assert(updaterSource.includes("docker image inspect"), `${updater} must verify the pulled image locally`);
-  }
   const wrapperName = process.platform === "win32" ? "update-wiki-kit.cmd" : "update-wiki-kit.sh";
   const wrapperPath = path.join(CUSTOM_SMOKE_ROOT, "wiki-kit-agent", wrapperName);
   const wrapperCommand = process.platform === "win32" ? "cmd.exe" : "sh";
@@ -679,6 +575,8 @@ function main() {
   fs.writeFileSync(wrapperMarkerPath, `${JSON.stringify(wrapperMarker, null, 2)}\n`, "utf8");
   const wrapperFakeDockerDir = path.join(CUSTOM_SMOKE_ROOT, "wrapper-fake-docker");
   fs.mkdirSync(wrapperFakeDockerDir, { recursive: true });
+  // This fixture verifies update selection and pull dispatch, not Docker image
+  // inspection: a Windows batch stub transfers control at the first invocation.
   const fakeDocker = path.join(wrapperFakeDockerDir, process.platform === "win32" ? "docker.cmd" : "docker");
   const fakeDockerLog = path.join(wrapperFakeDockerDir, "arguments.log");
   fs.writeFileSync(
@@ -689,7 +587,7 @@ function main() {
     "utf8"
   );
   if (process.platform !== "win32") fs.chmodSync(fakeDocker, 0o755);
-  const wrapperResult = run(wrapperCommand, wrapperArgs, {
+  run(wrapperCommand, wrapperArgs, {
     cwd: CUSTOM_SMOKE_ROOT,
     env: {
       ...process.env,
@@ -698,10 +596,9 @@ function main() {
       WIKI_KIT_DOCKER_LOG: fakeDockerLog,
     },
   });
-  assert(wrapperResult.status === 0, "update wrapper failed");
   const pulledArguments = fs.existsSync(fakeDockerLog) ? fs.readFileSync(fakeDockerLog, "utf8") : "";
   assert(
-    pulledArguments.includes("pull") && pulledArguments.includes(DEFAULT_IMAGE),
+    pulledArguments.split(/\r?\n/).some(line => line.startsWith("pull ") && line.includes(DEFAULT_IMAGE)),
     "update wrapper did not pull the installed image"
   );
   assertInstall(CUSTOM_SMOKE_ROOT, "wiki-kit-agent");
@@ -709,7 +606,9 @@ function main() {
     !fs.existsSync(path.join(CUSTOM_SMOKE_ROOT, ".agents")),
     "custom update wrapper created a second default installation"
   );
+}
 
+function verifyAmbiguousInstall() {
   const ambiguousRoot = path.join(ARTIFACTS_ROOT, "verify-smoke-ambiguous");
   prepareScratch(ambiguousRoot);
   for (const agentsDir of ["agents-one", "agents-two"]) {
@@ -721,8 +620,51 @@ function main() {
     [path.join(ROOT, "bin", "wiki-kit.js"), "update", ambiguousRoot],
     "Multiple wiki-kit installations found (agents-one, agents-two)"
   );
+}
 
-  runNpm(["pack", "--dry-run"]);
+function verifyPublishedPackage() {
+  const inventory = JSON.parse(runNpm(["pack", "--dry-run", "--json"]).stdout);
+  // npm versions emit either an array or an object keyed by package name.
+  const packed = Array.isArray(inventory) ? inventory[0] : inventory[PACKAGE_METADATA.name];
+  assert(Array.isArray(packed?.files), "npm pack did not return a package file inventory");
+  const files = new Set(packed.files.map(file => file.path));
+  const manifest = PACKAGE_METADATA;
+  for (const name of [".", "./dsh", "./dsh-mcp-client", "./dsh-runner"]) {
+    assert(typeof manifest.exports?.[name] === "string", `public package export is missing: ${name}`);
+  }
+  const patch = YAML.parse(fs.readFileSync(path.join(ROOT, manifest.dsh.bundle.patch), "utf8"));
+  assert(patch.some(operation => operation.insert?.some(plugin => plugin.name === `${manifest.name}/dsh`)), "DSH bundle patch does not reference the public lifecycle export");
+  const entries = [
+    ...Object.values(manifest.bin),
+    manifest.main,
+    ...Object.values(manifest.exports),
+    manifest.dsh.bundle.patch,
+    "templates/root/.agents/skills/wiki/SKILL.md",
+    "templates/root/.agents/skills/wiki/references/authoring.md",
+    "templates/root/.agents/run-wiki-manager.mcp.js",
+  ];
+  for (const entry of entries) {
+    assert(files.has(entry.replace(/^\.\//, "")), `published package is missing ${entry}`);
+  }
+}
+
+function main() {
+  // Installer/package behavior only; DSH runtime and live Docker checks have
+  // dedicated verify-dsh-mcp.js and verify-runner.js entrypoints.
+  const scenarios = [
+    ["release contracts and repository isolation", verifyContracts],
+    ["fresh install and invalid options", verifyDefaultInstall],
+    ["user configuration preservation and idempotent updates", verifyMergedInstall],
+    ["missing and malformed configuration diagnostics", verifyDiagnostics],
+    ["legacy policy migration", verifyLegacyPolicy],
+    ["custom installation and update wrapper", verifyCustomInstall],
+    ["ambiguous installation rejection", verifyAmbiguousInstall],
+    ["published package assets", verifyPublishedPackage],
+  ];
+  for (const [name, verify] of scenarios) {
+    verify();
+    console.log(`verify: ${name}: ok`);
+  }
   console.log("verify: ok");
 }
 

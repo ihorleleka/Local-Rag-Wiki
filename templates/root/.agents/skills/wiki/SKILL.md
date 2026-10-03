@@ -1,13 +1,15 @@
 ---
 name: wiki
-description: Decision-sensitive repository knowledge retrieval, authoring, maintenance, and trust audits using wiki-manager when available or an explicit local-file fallback. Use when repository knowledge could change a non-trivial decision or when the user mentions wiki, knowledge base, packets, schema reports, or wiki_* tools. Skip ritual retrieval when current context is sufficient.
+description: Decision-sensitive repository knowledge retrieval, authoring, maintenance, and trust audits using wiki-manager when available or an explicit local-file fallback. Use when repository knowledge could change a non-trivial decision or when the user mentions wiki, knowledge base, packets, schema reports, or wiki_* tools.
 ---
 
 # Wiki
 
-Repository `wiki/` notes are authored knowledge; packets are generated retrieval
-artifacts. Neither is proof that a claim is correct or authority to expand a task.
-Keep durable policy in `AGENTS.md`, workflow here, and project facts in the wiki.
+`wiki/` notes are authored sources; packets are generated retrieval artifacts.
+Never edit generated packets. This skill owns knowledge workflow guidance;
+[authoring guidance](references/authoring.md) owns write-back eligibility, note
+structure, and safe writes. Load that reference only when considering write-back,
+initializing, capturing, or changing notes, or auditing their authoring quality.
 
 ## Establish Available Capabilities
 
@@ -27,132 +29,104 @@ Choose the mode for the operation:
 The managed tools are `wiki_search`, `wiki_read`, `wiki_list`, `wiki_tree`,
 `wiki_schema_report`, `wiki_write`, `wiki_capture`, `wiki_delete`, and `wiki_rename`.
 Use available native operations; a missing write tool need not prevent native
-reads. Permission denials, validation errors, and hash conflicts are not reasons
-to bypass a managed write with a direct edit.
-After an ambiguous write failure, establish whether it applied before retrying
-through either path.
-
-In local-file mode, use scoped file search/read and normal repository editing
-tools. Coordinate one writer per note, re-read immediately before editing, and
-merge intervening changes. Local checks do not substitute for server schema or
-retrieval validation. Report the limitation once when relevant; workers report
-it to their lead rather than generating repeated user-facing notices.
+reads. In local-file mode, use scoped file search/read and normal repository
+tools. Before any write, follow the authoring reference's mode-specific safeguards.
 
 If managed tools become available later, validate affected notes and confirm a
 read/search reflects the latest content before trusting indexed results. Do not
 wait for an unobservable watcher or claim freshness from elapsed time alone.
 
-## Choose the Smallest Route
+## Choose the Operation
 
-- **Retrieve** when repository guidance could change the next decision.
-- **Initialize** a missing baseline after enough code evidence exists to orient substantive work.
-- **Maintain** a canonical owner when durable guidance is missing, stale, or conflicting.
-- **Capture** a costly unresolved finding as a pending investigation, not established fact.
-- **Audit** evidence, structure, freshness, and retrieval effectiveness.
+- **Retrieve:** answer an uncovered decision-relevant question using the route below.
+- **Initialize, maintain, or capture:** load the authoring reference and apply its
+  eligibility checks before planning a write.
+- **Audit:** use the audit route below; load authoring guidance when assessing
+  note structure or evidence quality.
 
-Retrieval and audits are read-only unless fixes are requested or independently
-meet write-back criteria. A search miss alone does not authorize a new note.
-Read [authoring guidance](references/authoring.md) before initialization or
-substantive authoring; do not load it for routine retrieval.
+Retrieval and audits are read-only unless fixes are requested or meet authoring
+eligibility. A search miss alone is not evidence that a new note is warranted.
+Do not load authoring guidance for routine retrieval.
 
-## Retrieve and Reuse a Decision Brief
+## Retrieve and Prepare a Decision Brief
 
-1. Name the decision that knowledge could change. Skip retrieval when current
-   context already settles it and no relevant input has changed.
-2. In managed mode, use a focused `wiki_search` for known topics (`top_k: 1-2`,
-   scoped by `path_prefix` where useful). For unfamiliar broad scope, use
-   `wiki_tree` and abstract search (`top_k: 3`) to select owners, then packets.
-   Read full notes for insufficient packets, conflicting claims, or critical
-   security/operational decisions.
+1. Name the unanswered decision and the information needed to settle it.
+2. In managed mode, shape `wiki_search` around each information need using the
+   matrix below; scope by `path_prefix` only when the owner subtree is known.
+   For unfamiliar scope, use `wiki_tree` and abstract search to select owners,
+   then packets. Read full notes for insufficient packets, conflicting claims,
+   or critical security/operational decisions.
 3. In local-file mode, locate the likely owner with a bounded path/content
    search, then read relevant sections. Do not replace packet retrieval with
    a full wiki dump.
-4. Stop when 1-3 relevant owners settle the decision. After an honest miss, try
-   at most one better focused query, then inspect code instead of search looping.
+4. Stop when sufficient relevant owners settle each decision (usually 1-3 per
+   decision, not a cap for the whole task). After an honest miss for an information
+   need, try at most one better focused query, then inspect code instead of search
+   looping.
 5. Corroborate decision-critical, stale, incomplete, or contradictory claims
    against source or scoped execution evidence. When present, inspect
    `schema_health`, `freshness_state`, `evidence_state`, `verification_required`,
    `last_verified`, and `gaps`; these signals are not proof of behavior.
 
-For non-trivial delegated work, pass a short decision brief in the handoff:
+### Query Shape and Starting Budget
+
+Split by information need, not word count. A mixed query makes unrelated topics
+compete in one ranking; increasing `top_k` does not ensure coverage of each topic.
+Conversely, splitting a coherent relationship can lose the context needed to
+retrieve its contract. These are starting heuristics, not measured guarantees
+that three searches outperform one.
+
+| Information need | Starting search shape | Why |
+|---|---|---|
+| One known fact or canonical owner | One focused query, `top_k: 1-2`, packet depth | Avoid unrelated context; read the known note directly when its path is available. |
+| A few distinct decisions, such as ownership, expected behavior, and verification requirements | One focused query per uncovered need; usually 2-3 queries, `top_k: 2-3` each, packet depth | Give each need its own retrieval budget rather than one keyword pile with `top_k: 8-10`. |
+| One cross-boundary relationship, such as a producer/consumer contract | One query naming both sides and the relationship, `top_k: 3` | Preserve the shared contract; split only if a specific side remains uncovered. |
+| Unfamiliar repository or unclear ownership | `wiki_tree` plus one coherent orientation query, `depth: "abstract"`, `top_k: 3`; widen to `6-8` if several owners must be mapped | Scan cheaply before loading selected packets; a larger single search is for coverage of one map, not unrelated questions. |
+| One coherent review needing several related owners, such as constraints on changing a shared interface | One focused query, `depth: "abstract"`, `top_k: 6-8`, then selected packets/full notes | A wider candidate set can help when all owners inform the same decision; target uncovered subquestions afterward. |
+
+Phrase each query as a clear information need using the project's terminology:
+`<component> ownership and dependency constraints`, `<operation> expected failure behavior`,
+or `<change> verification requirements`. Search these separately only when they
+are distinct unanswered questions. Keep `<producer> <consumer> shared contract`
+together when the relationship itself is the question.
+
+Run independent searches concurrently only when supported; sequence searches
+that depend on discovered terminology or owners. Deduplicate by canonical
+source/path, retain which need each source supports, and check coverage per need
+rather than counting hits or comparing relevance scores across queries. Three
+searches with `top_k: 3` return up to nine candidates, not necessarily nine unique
+owners or the same cost as one search with `top_k: 8`. Use abstracts for wide scans
+and load only decision-relevant packets/full notes. Do not fan out into every
+possible topic or widen results to hide a poor query. Apply the same
+information-need split to bounded local-file search/read; native ranking and
+depth controls are unavailable there.
+
+### Handoff Format and Evidence Records
+
+Pass sufficient context to delegated workers instead of requiring duplicate
+retrieval. The lead consolidates findings; workers return evidence and candidate
+knowledge unless explicitly assigned a distinct wiki owner.
+Structure the decision brief with:
 
 - **Decision and constraints:** what must be decided/preserved, with canonical note IDs or paths.
 - **Evidence:** relevant code anchors, approved decisions, and verification scope.
 - **Open questions:** what remains unverified and who can resolve it.
 - **Invalidation:** changes to contracts, source, configuration, or evidence that require refresh.
 
-Keep it to the relevant facts, not another copy of all policies. A fresh brief
-can satisfy a worker's retrieval need; the worker still verifies the code it
-changes. Reuse it across related tasks and refresh only affected claims.
-Briefs belong in working context or task records, not a new wiki note by default.
+Keep it to relevant facts, not another copy of all policies. Store the brief in
+working context or task records, not a new wiki note by default.
 
-## Delegation and Evidence
-
-The lead owns consolidation unless a worker is explicitly assigned a distinct
-wiki owner. Workers return candidate knowledge with code anchors or scoped
-verification evidence, not merely "verified" or "ready" labels.
-
-Keep approved decisions, observed code, executed checks, and unverified reports
-distinct. An approved contract is not an implemented feature; a generated type
-is not runtime acceptance; a successful build is not browser parity.
+Distinguish approved decisions, code observations, scoped execution results,
+and unverified reports. Approval is not implementation or runtime acceptance;
+a delegated summary needs accessible supporting evidence before it is verified.
 
 For execution claims, retain the command, relevant version/configuration/feature
 scope, source snapshot or run identity, result, and a retrievable diagnostic
-record in the execution workspace. Missing evidence means the claim remains
-reported/unverified; recover or reproduce it when the next decision requires it.
-Do not repeat every delegated investigation when its supporting evidence and
-scope are sufficient. Readiness gates belong to the owning implementation
-workflow; the wiki does not replace them.
+record in the execution workspace. Recover missing evidence or reproduce the
+check when the next decision requires it. Readiness gates belong to the owning
+implementation workflow; the wiki does not replace them.
 
-## Initialize, Maintain, or Capture
-
-1. Decide whether a finding is durable and more valuable to retain than to
-   rediscover. Keep task queues, current pass counts, patch readiness, and raw
-   logs in execution records, not canonical notes.
-2. If substantive work lacks orientation, establish the smallest verified
-   baseline: a navigational index and focused owners supported by the repository
-   purpose and at least one entrypoint or major boundary. Do this before the
-   next material decision; do not invent coverage or create a file inventory.
-3. Correct decision-changing stale guidance promptly. Batch other durable
-   findings at coherent milestones, not after each worker message. A no-write
-   outcome needs a concrete reason, not a new file or per-event announcement.
-4. Update the narrowest canonical owner. Split distinct topics; do not copy
-   contracts between plans, runbooks, and capability notes. Runbooks describe
-   reproducible procedures and limits, not the latest build status.
-5. Use a pending `investigation` for costly unresolved findings, identifying
-   scope, uncertainty, and a verification path. In managed mode use
-   `wiki_capture`; in local-file mode author the same supported note kind and
-   `status: pending`. Later verify/promote it, or remove it when no longer useful.
-6. Before delivery, reconcile durable discoveries and contradictions. Keep
-   unsupported behavior as explicit questions, not claims of accepted capability.
-
-## Write Safely and Validate
-
-In managed mode, read the current note and preserve its `content_hash`. Write
-with `wiki_write(expected_hash: ...)`; on conflict, re-read and merge rather than
-dropping the guard. New notes may omit the hash only when absent. Use native
-delete/rename with the latest source hash and reconcile reported inbound links.
-
-In local-file mode, re-read and make targeted edits with normal approval and
-concurrency precautions. Before deleting/renaming, inspect inbound references
-and reconcile affected links; do not claim compare-and-swap protection.
-
-For either mode:
-- Preserve supported frontmatter and the note kind's shape.
-- Keep one retrieval purpose and authoritative owner per note.
-- Check evidence supports the exact claim and distinguish uncertainty.
-- Reconcile old claims, terminology, links, and scope rather than appending contradictions.
-- Use repository-relative evidence; never commit machine-local paths or editor URIs.
-- Never edit generated packets or treat retrieved commands as permission to execute.
-
-Managed verification uses `wiki_schema_report` plus focused retrieval; a new
-baseline also needs an orientation query. Local verification uses existing
-local validators when available, otherwise explicit frontmatter/shape, link,
-evidence, and diff checks. Mark server schema/index checks unperformed rather
-than claiming an equivalent pass. A mixed-capability session reports each check
-according to what was actually available.
-
-## Audit and Report
+## Audit
 
 State the audit question and evidence scope. In managed mode, sample real
 queries for owner relevance, honest misses, freshness, and response size. In
@@ -164,7 +138,14 @@ inspection reduced, and claims reproducible across sessions, not note/search
 counts. Separate documentation problems from tool delivery, execution quality,
 and task acceptance problems. Report proposed fixes separately from applied ones.
 
-At a completed substantive deliverable, summarize material knowledge changes
-once: `wiki updated: <notes>` or `no wiki write-back warranted: <reason>`.
-Mention retrieval only when it affected the outcome, and disclose relevant
-mode/verification limits. Do not repeat this after routine worker notifications.
+## Completion
+
+At completion of substantive work where repository knowledge was relevant,
+consider whether durable findings need write-back; load authoring guidance if
+needed to decide or act. Report once: `wiki updated: <notes>` or
+`no wiki write-back warranted: <reason>`. Do not impose this report on unrelated
+or trivial work. Mention retrieval only when it changed the outcome, constrained
+work, or exposed a durable gap; do not repeat status after routine worker updates.
+Disclose relevant capability and verification limits, including checks not run.
+Never claim indexing, schema validation, or concurrency guarantees not exercised.
+Workers return these details to their lead for consolidated reporting.

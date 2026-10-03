@@ -1,6 +1,25 @@
 # Wiki Authoring Reference
 
-Load this reference only for Initialize, Migrate, or non-trivial Maintain work.
+Load this reference when deciding or performing write-back, initializing,
+capturing, changing notes, or auditing authoring quality; not for routine retrieval.
+
+## Write-Back Eligibility and Timing
+
+Keep one canonical owner per durable topic. Retain verified contracts, reusable
+procedures, approved decisions, and costly-to-recover findings, not an inventory
+of everything inspected. A no-write outcome is valid when existing knowledge is
+accurate, evidence is insufficient, or maintenance would cost more than rediscovery.
+Do not silently redefine policy, ownership, or product behavior; obtain authority
+for those changes.
+
+When substantive work lacks orientation, establish the smallest verified baseline
+once the repository purpose and one entrypoint or major boundary are known,
+before the next material decision. Insufficient evidence is not permission to
+invent claims or create a file inventory.
+
+Correct decision-changing stale guidance promptly. Batch other durable findings
+at coherent milestones, not after each agent message or test run. Keep costly
+unresolved findings pending with a verification path; repetition is not verification.
 
 ## Specificity And Generalization
 
@@ -149,16 +168,17 @@ verified owners and identify material gaps or open questions.
 
 ## Write-Back Planning
 
-1. Separate durable findings from execution state and map each retained topic to
-   its smallest authoritative owner. Correct decision-changing errors promptly;
-   batch other changes at coherent milestones.
-2. Update existing owners first. Split genuinely distinct contracts, rather than
-   accumulating all discoveries in a runbook or incident note.
-3. Reconcile delegated evidence through the lead. Unresolved claims belong in
-   `Open questions` or a pending investigation, not accepted capability summaries.
-4. Follow the skill's initialization timing and mode-specific validation. A
-   baseline needs verified orientation and coverage limits, not a file inventory.
-5. A no-write decision needs a reason in the delivery summary, not a new note.
+1. Map each eligible finding to its smallest authoritative owner and locate the
+   supporting evidence. Update existing owners first.
+2. For initialization, create a navigational index and focused notes grounded in
+   inspected repository evidence; state material coverage limits.
+3. Read the selected owner and reconcile affected claims, terminology, links,
+   and scope. Split genuinely distinct contracts, not every individual finding.
+4. Reconcile delegated evidence through the lead. Unresolved claims belong in
+   `Open questions` or a pending `investigation`. Use `wiki_capture` in managed
+   mode or the same supported kind with `status: pending` in local-file mode.
+5. Follow the safe-write procedure and final quality gate below. Return changed
+   owners and verification results for the skill's completion report.
 
 ## Change Artifacts And Durable Ownership
 
@@ -185,6 +205,27 @@ durable knowledge rather than source-by-source narration:
 - give material claims bounded evidence rather than a source-by-source dump;
 - keep maps navigational and contracts in one authoritative owner.
 
+## Write Safely and Validate
+
+Use the capability mode established by the skill. In managed mode, read the
+current note and preserve its `content_hash`. Write with
+`wiki_write(expected_hash: ...)`; on conflict, re-read and merge rather than
+dropping the guard. New notes may omit the hash only when absent. Use native
+delete/rename with the latest source hash and reconcile reported inbound links.
+Permission denials, validation errors, and hash conflicts do not justify bypassing
+managed writes with direct edits. After an ambiguous failure, check whether the
+write applied before retrying.
+
+In local-file mode, coordinate one writer per note, re-read immediately before
+editing, and merge intervening changes. Before deleting/renaming, inspect and
+reconcile inbound references. Local edits have no managed atomic-write guarantee.
+
+Managed verification uses `wiki_schema_report` plus focused retrieval; a new
+baseline also needs an orientation query. Local verification uses existing
+validators when available, otherwise explicit frontmatter/shape, link, evidence,
+and diff checks. Record which checks ran and which server schema/index checks
+remain unperformed; local checks are not equivalent to server validation.
+
 ## Final Quality Gate
 
 Before completing non-trivial authoring or maintenance, verify that:
@@ -194,6 +235,4 @@ Before completing non-trivial authoring or maintenance, verify that:
 - contradictions, scope limits, and stale sections are made explicit;
 - terminology, aliases, and public names are consistent across linked owners;
 - each changed note remains concise and retrieval-friendly (no source dump);
-- managed mode: schema validation and focused retrieval confirm the intended behavior;
-- local-file mode: frontmatter/shape, links, evidence, and diffs are checked;
-  server schema/index verification is explicitly unperformed.
+- mode-specific validation above is complete, with results and unperformed checks recorded.
