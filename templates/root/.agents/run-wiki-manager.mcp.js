@@ -227,6 +227,31 @@ async function getHttpStatus(url, options = {}) {
   });
 }
 
+async function getReadyHealth(url) {
+  return new Promise((resolve, reject) => {
+    const req = http.get(url, { timeout: REQUEST_TIMEOUT_MS }, (res) => {
+      let body = "";
+      res.setEncoding("utf8");
+      res.on("data", (chunk) => { body += chunk; });
+      res.on("end", () => {
+        if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+        try {
+          const health = JSON.parse(body);
+          if (health.status === "ok" && health.service === "ready") return resolve();
+          reject(new Error(`service status ${health.status || "unknown"}`));
+        } catch {
+          reject(new Error("invalid health response"));
+        }
+      });
+    });
+    req.on("error", reject);
+    req.setTimeout(REQUEST_TIMEOUT_MS, () => {
+      req.destroy();
+      reject(new Error("timeout"));
+    });
+  });
+}
+
 async function waitFor(checkFn, timeoutMs = READY_TIMEOUT_MS, intervalMs = POLL_INTERVAL_MS) {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
@@ -245,7 +270,7 @@ async function isEndpointReady(port) {
   const { healthUrl, mcpUrl } = makeUrls(port);
 
   try {
-    await getHttpStatus(healthUrl);
+    await getReadyHealth(healthUrl);
     await getHttpStatus(mcpUrl, {
       acceptStatus: (statusCode) => statusCode !== 404,
       headers: { Accept: "application/json, text/event-stream" },
@@ -513,7 +538,7 @@ async function startOrAttachContainer(port) {
   }
 
   const { healthUrl, mcpUrl } = makeUrls(port);
-  const ready = await waitFor(() => getHttpStatus(healthUrl), HEALTH_TIMEOUT_MS, 1000);
+  const ready = await waitFor(() => getReadyHealth(healthUrl), HEALTH_TIMEOUT_MS, 1000);
   if (!ready) {
     throw new Error(
       `KB container "${containerName}" did not become healthy within ${HEALTH_TIMEOUT_MS}ms`
