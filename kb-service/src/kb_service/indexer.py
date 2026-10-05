@@ -953,6 +953,50 @@ class KnowledgeIndex:
             "files": files,
         }
 
+    @staticmethod
+    def _is_vector_store_corruption(error: BaseException) -> bool:
+        message = str(error).lower()
+        return "failed to apply logs to the hnsw segment writer" in message
+
+    def _reset_vector_store(self) -> None:
+        """Discard only the derived collection and force a complete rebuild.
+
+        Deleting the collection through Chroma (rather than deleting files under
+        an open SQLite/HNSW client) preserves Chroma's own bookkeeping. Wiki
+        source files are outside ``kb_root`` and are never touched.
+        """
+        self.client.delete_collection("wiki_chunks")
+        self.collection = self.client.get_or_create_collection(
+            "wiki_chunks", metadata={"hnsw:space": "cosine"}
+        )
+        self._lexical_cache = None
+        self._write_manifest({"files": {}})
+
+    def _reindex_with_recovery(
+        self,
+        *,
+        target_paths: set[str] | None = None,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        try:
+            return self._reindex_unlocked(
+                target_paths=target_paths,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+        except Exception as error:
+            if not self._is_vector_store_corruption(error):
+                raise
+            LOGGER.warning(
+                "Corrupt Chroma vector index detected; resetting derived storage and rebuilding"
+            )
+            self._reset_vector_store()
+            return self._reindex_unlocked(
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+
     def reindex(
         self,
         *,
@@ -961,12 +1005,37 @@ class KnowledgeIndex:
     ) -> dict[str, int]:
         # The coordinator owns reindex scheduling; this operation itself does
         # not hold a lock while scanning, embedding, or updating Chroma.
-        return self._reindex_unlocked(
+        return self._reindex_with_recovery(
             cancel_event=cancel_event,
             progress_callback=progress_callback,
         )
 
     def reindex_paths(
+        self,
+        rel_paths: set[str],
+        *,
+        cancel_event: threading.Event | None = None,
+        progress_callback: Callable[[int, int], None] | None = None,
+    ) -> dict[str, int]:
+        try:
+            return self._reindex_paths_unlocked(
+                rel_paths,
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+        except Exception as error:
+            if not self._is_vector_store_corruption(error):
+                raise
+            LOGGER.warning(
+                "Corrupt Chroma vector index detected during targeted indexing; rebuilding"
+            )
+            self._reset_vector_store()
+            return self._reindex_unlocked(
+                cancel_event=cancel_event,
+                progress_callback=progress_callback,
+            )
+
+    def _reindex_paths_unlocked(
         self,
         rel_paths: set[str],
         *,

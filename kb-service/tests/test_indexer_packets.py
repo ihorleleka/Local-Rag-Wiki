@@ -10,7 +10,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Barrier
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -1243,6 +1243,62 @@ class WikiPathSafetyTests(unittest.TestCase):
             self.assertEqual(result["removed"], 1)
             self.assertEqual(index.list_docs(), [])
             self.assertTrue(index.collection.delete_calls)
+
+
+class VectorStoreRecoveryTests(unittest.TestCase):
+    def setUp(self) -> None:
+        install_fakes()
+        sys.modules.pop("kb_service.indexer", None)
+        self.indexer_module = importlib.import_module("kb_service.indexer")
+
+    def make_index(self):
+        index = self.indexer_module.KnowledgeIndex.__new__(self.indexer_module.KnowledgeIndex)
+        index.client = Mock()
+        index.client.get_or_create_collection.return_value = Mock()
+        index.collection = Mock()
+        index._lexical_cache = {"stale": True}
+        index._write_manifest = Mock()
+        return index
+
+    def test_hnsw_compaction_failure_resets_derived_collection_then_retries_once(self) -> None:
+        index = self.make_index()
+        index._reindex_unlocked = Mock(side_effect=[
+            RuntimeError("Error in compaction: Failed to apply logs to the hnsw segment writer"),
+            {"changed": 12},
+        ])
+
+        result = index._reindex_with_recovery()
+
+        self.assertEqual(result, {"changed": 12})
+        index.client.delete_collection.assert_called_once_with("wiki_chunks")
+        index.client.get_or_create_collection.assert_called_once_with(
+            "wiki_chunks", metadata={"hnsw:space": "cosine"}
+        )
+        index._write_manifest.assert_called_once_with({"files": {}})
+        self.assertIsNone(index._lexical_cache)
+        self.assertEqual(index._reindex_unlocked.call_count, 2)
+
+    def test_unrelated_error_is_not_treated_as_vector_store_corruption(self) -> None:
+        index = self.make_index()
+        index._reindex_unlocked = Mock(side_effect=RuntimeError("network unavailable"))
+
+        with self.assertRaisesRegex(RuntimeError, "network unavailable"):
+            index._reindex_with_recovery()
+
+        index.client.delete_collection.assert_not_called()
+
+    def test_targeted_reindex_recovers_by_running_a_full_rebuild(self) -> None:
+        index = self.make_index()
+        index._reindex_paths_unlocked = Mock(side_effect=RuntimeError(
+            "Failed to apply logs to the hnsw segment writer"
+        ))
+        index._reindex_unlocked = Mock(return_value={"changed": 12})
+
+        result = index.reindex_paths({"changed.md"})
+
+        self.assertEqual(result, {"changed": 12})
+        index.client.delete_collection.assert_called_once_with("wiki_chunks")
+        index._reindex_unlocked.assert_called_once()
 
 
 if __name__ == "__main__":
