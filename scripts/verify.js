@@ -179,6 +179,11 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   assert(dshServer?.command === "node", "DSH wiki-manager command is incorrect");
   assert(dshServer?.args?.[0] === `${agentsDir}/run-wiki-manager.mcp.js`, "DSH runner path is incorrect");
   assert(fs.existsSync(path.join(targetRoot, dshServer.args[0])), "installed MCP runner is missing");
+  const runner = fs.readFileSync(path.join(targetRoot, dshServer.args[0]), "utf8");
+  assert(
+    /"--ulimit"\s*,\s*"core=0:0"/.test(runner),
+    "installed MCP runner is missing the zero soft/hard core limit"
+  );
 }
 
 function assertRepositoryUniqueResourceNames() {

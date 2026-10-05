@@ -10,7 +10,8 @@ const RUNNER_PATH = path.join(SCRATCH_ROOT, ".agents", "run-wiki-manager.mcp.js"
 const CONTAINER_NAME = `wiki-kit-runner-test-${process.pid}`;
 const KB_VOLUME = `${CONTAINER_NAME}-kb-data`;
 const HF_CACHE_VOLUME = `${CONTAINER_NAME}-hf-cache`;
-const FAILURE_CONTAINER_NAME = `${CONTAINER_NAME}-unhealthy`;
+// Stay within the runner contract's 32-character container-name limit.
+const FAILURE_CONTAINER_NAME = `${CONTAINER_NAME}-bad`;
 const FAILURE_KB_VOLUME = `${FAILURE_CONTAINER_NAME}-kb-data`;
 const TIMEOUT_MS = 120000;
 const { DEFAULT_IMAGE } = require(path.join(
@@ -207,6 +208,50 @@ function assertRepositoryMountIsReadOnly() {
   }
 }
 
+function inspectContainer() {
+  return JSON.parse(run("docker", ["inspect", CONTAINER_NAME]))[0];
+}
+
+function assertCrashDumpLimits() {
+  const { HostConfig: config } = inspectContainer();
+  const core = config.Ulimits?.find((limit) => limit.Name === "core");
+  if (!core || core.Soft !== 0 || core.Hard !== 0) {
+    fail("Expected HostConfig.Ulimits to disable soft and hard core dumps", JSON.stringify(config.Ulimits));
+  }
+  if (config.Memory !== 0 || config.MemoryReservation !== 0 || config.MemorySwap !== 0) {
+    fail("Runner must not impose default memory limits", JSON.stringify(config));
+  }
+}
+
+async function assertLegacyContainerIsNotRecreated(lifecycleArgs) {
+  // Simulate a container created by an older installed runner without the limit.
+  const legacyRunnerPath = path.join(SCRATCH_ROOT, ".agents", "legacy-runner.js");
+  const runner = fs.readFileSync(RUNNER_PATH, "utf8");
+  const legacyRunner = runner.replace(/"--ulimit"\s*,\s*"core=0:0"\s*,/, "");
+  if (legacyRunner === runner) fail("Could not prepare the legacy runner fixture");
+  fs.writeFileSync(legacyRunnerPath, legacyRunner, "utf8");
+  run("docker", ["rm", "-f", CONTAINER_NAME]);
+  run(process.execPath, [legacyRunnerPath], {
+    env: { ...TEST_ENV, KB_LIFECYCLE_COMMAND: "start" },
+  });
+  const legacy = inspectContainer();
+  if (legacy.HostConfig.Ulimits?.some((limit) => limit.Name === "core" && limit.Soft === 0 && limit.Hard === 0)) {
+    fail("Legacy fixture unexpectedly already disables core dumps");
+  }
+
+  run(process.execPath, [...lifecycleArgs, "start", SCRATCH_ROOT], { env: TEST_ENV });
+  const client = createClient("wiki-kit-runner-verifier-legacy");
+  try {
+    await client.initialize();
+    if (inspectContainer().Id !== legacy.Id) {
+      fail("Runner automatically recreated a healthy legacy container to change core limits");
+    }
+  } finally {
+    await client.close();
+  }
+  return legacy.Id;
+}
+
 function assertContainerRunning() {
   const running = run("docker", [
     "inspect",
@@ -359,6 +404,8 @@ async function main() {
       fail(`Expected Docker HostIp 127.0.0.1, received ${binding.HostIp || "<empty>"}`);
     }
     assertRepositoryMountIsReadOnly();
+    assertCrashDumpLimits();
+    const originalContainerId = inspectContainer().Id;
     const status = run(
       process.execPath,
       [path.join(ROOT, "bin", "wiki-kit.js"), "status", SCRATCH_ROOT],
@@ -419,12 +466,21 @@ async function main() {
     await clientB.close();
     assertContainerRunning();
 
+    if (inspectContainer().Id !== originalContainerId) {
+      fail("Runner recreated the healthy shared container while attaching clients");
+    }
     const lifecycleArgs = [path.join(ROOT, "bin", "wiki-kit.js")];
     run("docker", ["stop", CONTAINER_NAME]);
     run(process.execPath, [...lifecycleArgs, "start", SCRATCH_ROOT], { env: TEST_ENV });
     assertContainerRunning();
+    assertCrashDumpLimits();
+    const legacyContainerId = await assertLegacyContainerIsNotRecreated(lifecycleArgs);
     run(process.execPath, [...lifecycleArgs, "restart", SCRATCH_ROOT], { env: TEST_ENV });
     assertContainerRunning();
+    assertCrashDumpLimits();
+    if (inspectContainer().Id === legacyContainerId) {
+      fail("Explicit restart did not replace the legacy container with the core limit");
+    }
     run(process.execPath, [...lifecycleArgs, "stop", SCRATCH_ROOT], { env: TEST_ENV });
     const remaining = spawnSync("docker", ["inspect", CONTAINER_NAME], {
       cwd: ROOT,

@@ -396,6 +396,9 @@ async function startContainer(port) {
     "-d",
     "--name",
     containerName,
+    // Defense in depth; service-level dumpability protection also covers piped cores.
+    "--ulimit",
+    "core=0:0",
     "-p",
     dockerPublishArgument(port),
     "-e",

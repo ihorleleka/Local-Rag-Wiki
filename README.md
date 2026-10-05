@@ -96,6 +96,24 @@ npx github:ihorleleka/Local-Rag-Wiki doctor . --live
 `start .`, `stop .`, and `pull .` are available the same way. The repository
 container persists independently of individual agent clients.
 
+## Crash-dump protection
+
+Starting with 0.2.5, the Linux backend disables process core dumps before loading native dependencies,
+including when WSL uses a piped crash collector (where `ulimit core=0` alone is
+not sufficient). Managed containers additionally use `--ulimit core=0:0`.
+The backend refuses to start on Linux if process-level protection cannot be
+established. Ordinary debugger/ptrace attachment to that process is also disabled.
+This contains crash-dump disk growth; it does not fix native crashes or limit RAM.
+
+To apply this protection to an existing installation, update the managed files,
+then run `pull .` and `restart .` using the lifecycle commands above. Updating
+files alone does not replace a running container. Restart briefly interrupts all
+clients sharing that repository's container, but retains wiki/index/model volumes.
+If `KB_IMAGE` is overridden, use an image containing this fix; the default image
+is pinned to the shared release version. Existing Windows dump files are not
+removed, and no host-wide WSL settings are modified. Custom image commands that
+bypass `python -m kb_service` also bypass its process-level protection.
+
 ## How it works
 
 - This package is the installer: it scaffolds and maintains the `.agents/`

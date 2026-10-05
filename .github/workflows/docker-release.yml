@@ -67,6 +67,9 @@ jobs:
           test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "io.github.ihorleleka.project-rag-wiki.index-schema-version" }}')" = "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'from kb_service.contract import INDEX_SCHEMA_VERSION; print(INDEX_SCHEMA_VERSION)')"
           test "$(docker image inspect "${CANDIDATE_IMAGE}" --format '{{ index .Config.Labels "io.github.ihorleleka.project-rag-wiki.mcp-tool-contract-version" }}')" = "$(docker run --rm "${CANDIDATE_IMAGE}" python -c 'from kb_service.contract import MCP_TOOL_CONTRACT_VERSION; print(MCP_TOOL_CONTRACT_VERSION)')"
 
+      - name: Verify Linux crash-dump protection
+        run: docker run --rm "${CANDIDATE_IMAGE}" python -m unittest discover -s /app/.knowledge-service/tests -p test_runtime_safety.py -v
+
       - name: Start release-candidate container
         run: |
           docker volume create local-rag-wiki-ci-hf
