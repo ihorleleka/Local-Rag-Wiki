@@ -9,6 +9,14 @@ const ROOT = path.resolve(__dirname, '..')
 const SCRATCH = path.join(ROOT, '.artifacts', 'verify-dsh-mcp')
 const LOADER = path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'workspace-mcp.mjs')
 const CLIENT = path.join(ROOT, 'templates', 'root', '.dsh', '.dsh-mcp-client.js')
+const DSH_RUNTIME_VERSION = '0.2.1-alpha.2'
+const DSH_RUNTIME_PEERS = [
+  '@deepseek-ai/dsh-attachment',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-subprocess',
+  '@deepseek-ai/dsh-timeout',
+  '@deepseek-ai/dsh-tools',
+]
 
 function reset() {
   fs.rmSync(SCRATCH, { recursive: true, force: true })
@@ -36,6 +44,17 @@ function yaml(runner, additions = '') {
 
 function expectError(operation, pattern) {
   assert.throws(operation, pattern)
+}
+
+function assertDshRuntimeCompatibility() {
+  const manifest = require(path.join(ROOT, 'package.json'))
+  for (const dependency of DSH_RUNTIME_PEERS) {
+    assert.equal(
+      manifest.peerDependencies?.[dependency],
+      DSH_RUNTIME_VERSION,
+      `${dependency} must declare exact compatibility with DSH ${DSH_RUNTIME_VERSION}`,
+    )
+  }
 }
 
 async function assertScopedBridge() {
@@ -191,6 +210,7 @@ async function assertLifecycleIntegration() {
 }
 
 async function main() {
+  assertDshRuntimeCompatibility()
   reset()
   const { loadWorkspaceWikiMcp } = await import(pathToFileURL(LOADER).href)
   const managedConfig = fs.readFileSync(
