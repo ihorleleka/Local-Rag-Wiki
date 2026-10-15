@@ -31,6 +31,10 @@ per repository when a configured agent client connects. Pre-pulling the image
 
 ## DeepSeek Harness
 
+The native bundle supports DSH `>=0.2.0-rc.2 <0.3.0-0`, including the
+currently published `0.2.1` alpha releases. A DSH `0.3.0` prerelease or later
+requires a compatible wiki-kit release.
+
 Install the native DSH bundle once into the profile you use (usually `web`):
 
 ```bash

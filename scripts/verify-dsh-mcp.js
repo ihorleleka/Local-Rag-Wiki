@@ -9,8 +9,9 @@ const ROOT = path.resolve(__dirname, '..')
 const SCRATCH = path.join(ROOT, '.artifacts', 'verify-dsh-mcp')
 const LOADER = path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'workspace-mcp.mjs')
 const CLIENT = path.join(ROOT, 'templates', 'root', '.dsh', '.dsh-mcp-client.js')
-const DSH_RUNTIME_VERSION = '0.2.1-alpha.2'
+const DSH_COMPATIBILITY_RANGE = '>=0.2.0-rc.2 <0.3.0-0'
 const DSH_RUNTIME_PEERS = [
+  '@deepseek-ai/dsh',
   '@deepseek-ai/dsh-attachment',
   '@deepseek-ai/dsh-llm',
   '@deepseek-ai/dsh-subprocess',
@@ -51,8 +52,8 @@ function assertDshRuntimeCompatibility() {
   for (const dependency of DSH_RUNTIME_PEERS) {
     assert.equal(
       manifest.peerDependencies?.[dependency],
-      DSH_RUNTIME_VERSION,
-      `${dependency} must declare exact compatibility with DSH ${DSH_RUNTIME_VERSION}`,
+      DSH_COMPATIBILITY_RANGE,
+      `${dependency} must declare compatibility with DSH ${DSH_COMPATIBILITY_RANGE}`,
     )
   }
 }
