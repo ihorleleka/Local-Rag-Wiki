@@ -800,7 +800,12 @@ async function main() {
 
 if (require.main === module) {
   main().catch(async (err) => {
-    console.error(err);
+    // This process is normally launched by an MCP host.  Serializing the
+    // Error object here includes a JavaScript stack which the host surfaces as
+    // a startup failure, even for an expected Docker Desktop startup race.
+    // Keep stderr actionable while preserving the non-zero exit code the host
+    // uses to trigger its reconnect policy.
+    console.error(err?.message || String(err));
     process.exit(1);
   });
 }

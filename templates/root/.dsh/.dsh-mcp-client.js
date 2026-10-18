@@ -63,6 +63,26 @@ function createTransport(config) {
 		case "streamable-http": return new StreamableHTTPClientTransport(new URL(config.url), { requestInit: { headers: config.headers } });
 	}
 }
+/**
+* Docker Desktop can be installed while its Linux engine is unavailable (most
+* commonly during startup).  The managed runner exits non-zero in that case so
+* the reconnect policy can retry.  Do not relay its child-process stack through
+* DSH's user-facing log: it is implementation detail, not an actionable error.
+*/
+function connectionErrorMessage(error) {
+	const message = String(error?.message ?? error ?? "");
+	const normalized = message.toLowerCase();
+	if ([
+		"docker desktop's linux engine is unavailable",
+		"docker engine is unavailable",
+		"dockerdesktoplinuxengine",
+		"failed to connect to the docker api",
+		"cannot connect to the docker daemon"
+	].some((fragment) => normalized.includes(fragment))) {
+		return "Docker engine is not available. Start Docker Desktop or wait for it to finish starting; wiki-manager will retry automatically.";
+	}
+	return message;
+}
 //#endregion
 //#region lib/types/tools.js
 /**
@@ -658,7 +678,7 @@ function startConnection(ctx, config, policy) {
 			await enqueueSync(generation, startup ? startupOpts : opts);
 		} catch (error) {
 			if (firstAttemptError === void 0) firstAttemptError = error;
-			if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${String(error)}`);
+			if (isCurrent(generation)) ctx.logger.warn(`${label}: connection attempt failed: ${connectionErrorMessage(error)}`);
 			try {
 				await generation.close();
 			} catch {}
@@ -781,4 +801,4 @@ async function apply(ctx, config) {
 	if (outcome.error !== void 0 && config.failOnStartupError) throw new Error(`mcp-client(${config.serverName}): initial connection or tool synchronization failed`, { cause: outcome.error });
 }
 //#endregion
-export { Config, apply, inject, name };
+export { Config, apply, connectionErrorMessage, inject, name };

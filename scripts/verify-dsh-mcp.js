@@ -112,6 +112,18 @@ async function assertScopedBridge() {
   assert.deepEqual(tools.schemas(agentB).map(tool => tool.name), [])
 }
 
+async function assertDockerUnavailableStatusMessage() {
+  const mcpClient = await import(pathToFileURL(CLIENT).href)
+  const runnerError = new Error(
+    "Docker Desktop's Linux engine is unavailable. Docker detail: docker exited with 1: failed to connect to the docker API at npipe:////./pipe/dockerDesktopLinuxEngine"
+  )
+  assert.equal(
+    mcpClient.connectionErrorMessage(runnerError),
+    'Docker engine is not available. Start Docker Desktop or wait for it to finish starting; wiki-manager will retry automatically.',
+  )
+  assert.equal(mcpClient.connectionErrorMessage(new Error('ordinary connection failure')), 'ordinary connection failure')
+}
+
 async function assertLifecycleIntegration() {
   const [{ Context }, { default: toolsPlugin }, { default: systemPromptPlugin }, { createScope }, { Session }, { createUserMessage }, lifecycle] = await Promise.all([
     import('@deepseek-ai/cordis'),
@@ -289,6 +301,7 @@ async function main() {
   assert.match(clientSource, /ctx\.tools\.register\(definition\)/)
   assert.match(clientSource, /return \(\) => connection\.dispose\(\)/)
 
+  await assertDockerUnavailableStatusMessage()
   await assertScopedBridge()
   await assertLifecycleIntegration()
   console.log('verify-dsh-mcp: ok')
