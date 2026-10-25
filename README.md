@@ -42,12 +42,17 @@ dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
 ```
 
 Restart that DSH profile, open an installed repository as its workspace, and
-start a session. On DSH's native `agent/created` / `agent/session-start`
-lifecycle, the bundle reads the active workspace's `.dsh/mcp.servers.yml`,
-validates its `wiki-manager` entry against the managed install marker, resolves
-the configured `node` executable through DSH's subprocess service, and mounts
-the bridge through `agent.ctx`. It never uses `process.execPath`, because that
-is the Electron executable in DSH Desktop. When Docker is reachable, initial
+start a session. On DSH's native `agent/created` lifecycle, the bundle compares
+the wiki-kit package version of the installed profile plugin—not the DSH runtime
+version—with the workspace install marker. When the plugin version is newer, it
+runs the workspace's `.agents/update-wiki-kit.cmd` on Windows or
+`.agents/update-wiki-kit.sh` on macOS/Linux once; the updated marker prevents
+another run for that plugin version. It then reads the active workspace's
+`.dsh/mcp.servers.yml`, validates its `wiki-manager` entry against the managed
+install marker, resolves the configured `node` executable through DSH's
+subprocess service, and mounts the bridge through `agent.ctx`. It never uses
+`process.execPath`, because that is the Electron executable in DSH Desktop.
+When Docker is reachable, initial
 discovery finishes before the model request is assembled, exposing stable native
 `mcp__wiki-manager__*` tools on that agent's tool scope. If Docker Desktop is
 still starting, the session remains usable and the bridge retries in the

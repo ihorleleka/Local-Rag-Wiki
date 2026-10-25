@@ -2,7 +2,9 @@ import * as mcpClient from '../../templates/root/.dsh/.dsh-mcp-client.js'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import { retrieveWikiTiers, shouldRetrieve } from './recall.mjs'
 import { keywords, textFrom } from './text.mjs'
+import path from 'node:path'
 import { loadWorkspaceWikiMcp } from './workspace-mcp.mjs'
+import { upgradeWorkspaceIfNeeded } from './workspace-upgrade.mjs'
 
 export const name = 'local-rag-wiki-lifecycle'
 const MESSAGE_SOURCE_KIND = 'local-rag-wiki'
@@ -110,6 +112,33 @@ export function apply(ctx) {
   const mcpReady = new Map()
   const mcpMounts = new Map()
   const recalledTurns = new Map()
+  // Shared across agents: a DSH profile can open concurrent sessions for the
+  // same repository, but an older workspace must only invoke its updater once.
+  const upgradeReady = new Map()
+
+  const ensureWorkspaceUpgrade = async agentsRoot => {
+    let ready = upgradeReady.get(agentsRoot)
+    if (!ready) {
+      ready = upgradeWorkspaceIfNeeded(agentsRoot)
+        .then(result => {
+          if (result.upgraded) {
+            console.info(`[local-rag-wiki] upgraded workspace wiki-kit from ${result.workspace} to ${result.plugin}`)
+          }
+          return result
+        })
+        .catch(error => {
+          // An existing managed runner remains usable if an opportunistic
+          // refresh fails (for example Docker is not currently available).
+          // Clear the shared attempt so a later agent can retry while the
+          // workspace marker still reports an older wiki-kit version.
+          upgradeReady.delete(agentsRoot)
+          console.warn(`[local-rag-wiki] automatic wiki-kit upgrade failed: ${error.message}`)
+          return { upgraded: false, error }
+        })
+      upgradeReady.set(agentsRoot, ready)
+    }
+    return ready
+  }
 
   const mountWikiMcp = agent => {
     const existing = mcpReady.get(agent.id)
@@ -125,11 +154,23 @@ export function apply(ctx) {
       return undefined
     }
     if (!discovered?.server) return undefined
-    if (discovered.ignoredLegacy.length > 0) {
-      console.warn(`[local-rag-wiki] ${discovered.configPath} takes precedence over legacy ${discovered.ignoredLegacy.join(', ')}`)
-    }
 
     const operation = (async () => {
+      // The validated runner path is always adjacent to the installation marker.
+      // Upgrade before mounting so the first MCP connection sees the refreshed
+      // workspace payload, then validate the updated configuration again.
+      await ensureWorkspaceUpgrade(path.dirname(discovered.server.args[0]))
+      try {
+        discovered = loadWorkspaceWikiMcp(workspace)
+      } catch (error) {
+        console.warn(`[local-rag-wiki] ignored invalid workspace MCP config after upgrade: ${error.message}`)
+        return false
+      }
+      if (!discovered?.server) return false
+      if (discovered.ignoredLegacy.length > 0) {
+        console.warn(`[local-rag-wiki] ${discovered.configPath} takes precedence over legacy ${discovered.ignoredLegacy.join(', ')}`)
+      }
+
       const subprocess = agent.ctx.get('subprocess')
       const command = subprocess
         ? await subprocess.resolveExecutable(discovered.server.command)
@@ -151,11 +192,9 @@ export function apply(ctx) {
     return ready
   }
 
-  // agent/created normally has the session cwd, but session-start is the
-  // supported startup-driving edge and also covers hosts that populate cwd
-  // between the two lifecycle notifications.
+  // DSH awaits agent/created before releasing queued work, so this is the
+  // supported startup edge for the workspace check and MCP registration.
   ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))
-  ctx.on('agent/session-start', ({ agent }) => mountWikiMcp(agent))
 
   ctx.on('agent/disposed', ({ agent }) => {
     // The child plugin is owned by agent.ctx and is already unwound before this

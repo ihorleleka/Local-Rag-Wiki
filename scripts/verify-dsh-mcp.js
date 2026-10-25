@@ -58,6 +58,37 @@ function assertDshRuntimeCompatibility() {
   }
 }
 
+async function assertWorkspaceUpgrade() {
+  const { compareVersions, upgradeCommand, upgradeWorkspaceIfNeeded } = await import(
+    pathToFileURL(path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'workspace-upgrade.mjs')).href,
+  )
+  const pluginVersion = require(path.join(ROOT, 'package.json')).version
+  const releaseVersion = pluginVersion.replace(/[-+].*$/, '')
+  const olderWorkspaceVersion = `${releaseVersion}-workspace`
+  assert(compareVersions(releaseVersion, olderWorkspaceVersion) > 0)
+  assert.equal(compareVersions(releaseVersion, releaseVersion), 0)
+  assert(compareVersions(olderWorkspaceVersion, releaseVersion) < 0)
+  assert.equal(compareVersions('not-a-version', releaseVersion), undefined)
+  const cmdFlags = ['/d', '/s', '/c']
+  assert.deepEqual(upgradeCommand('/repo/.agents', 'win32').args.slice(0, cmdFlags.length), cmdFlags)
+  assert.deepEqual(upgradeCommand('/repo/.agents', 'linux'), { command: 'sh', args: [path.join('/repo/.agents', 'update-wiki-kit.sh')] })
+
+  const agentsRoot = path.join(SCRATCH, 'upgrade', '.agents')
+  fs.mkdirSync(agentsRoot, { recursive: true })
+  const writeMarker = version => fs.writeFileSync(path.join(agentsRoot, '.wiki-kit-install.json'), `${JSON.stringify({ version })}\n`)
+  writeMarker(olderWorkspaceVersion)
+  const commands = []
+  const execute = async (command, args, cwd) => {
+    commands.push({ command, args, cwd })
+    writeMarker(releaseVersion)
+  }
+  const result = await upgradeWorkspaceIfNeeded(agentsRoot, { pluginVersion: releaseVersion, platform: 'linux', execute })
+  assert.equal(result.upgraded, true)
+  assert.deepEqual(commands, [{ command: 'sh', args: [path.join(agentsRoot, 'update-wiki-kit.sh')], cwd: path.dirname(agentsRoot) }])
+  assert.equal((await upgradeWorkspaceIfNeeded(agentsRoot, { pluginVersion: releaseVersion, execute })).upgraded, false)
+  assert.equal(commands.length, 1, 'the refreshed marker must prevent a second upgrade')
+}
+
 async function assertScopedBridge() {
   const [{ Context }, { default: toolsPlugin }, { default: systemPromptPlugin }, { createScope }, mcpClient] = await Promise.all([
     import('@deepseek-ai/cordis'),
@@ -302,6 +333,7 @@ async function main() {
   assert.match(clientSource, /return \(\) => connection\.dispose\(\)/)
 
   await assertDockerUnavailableStatusMessage()
+  await assertWorkspaceUpgrade()
   await assertScopedBridge()
   await assertLifecycleIntegration()
   console.log('verify-dsh-mcp: ok')
