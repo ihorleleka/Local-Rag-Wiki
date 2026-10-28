@@ -4,7 +4,25 @@ from __future__ import annotations
 
 import http.client
 import json
+from pathlib import Path
+import subprocess
 import sys
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CONTRACT_PATH = ROOT / "templates" / "root" / ".agents" / "wiki-manager-contract.js"
+
+
+def release_contract() -> dict:
+    """Load release expectations from the shared wiki-kit/container contract."""
+    script = (
+        "const { COMPATIBILITY } = require(process.argv[1]); "
+        "console.log(JSON.stringify(COMPATIBILITY));"
+    )
+    output = subprocess.check_output(
+        ["node", "-e", script, str(CONTRACT_PATH)], text=True
+    )
+    return json.loads(output)
 
 
 def decode_response(response: http.client.HTTPResponse) -> dict:
@@ -39,12 +57,18 @@ def post(port: int, message: dict, session_id: str | None = None) -> tuple[dict,
 
 def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 18111
+    expected_contract = release_contract()
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
     connection.request("GET", "/version")
     version = decode_response(connection.getresponse())
     connection.close()
-    assert version["index_schema_version"] == 7, version
-    assert version["mcp_tool_contract_version"] == 6, version
+    assert version["service_version"] == expected_contract["currentServiceVersion"], version
+    assert version["index_schema_version"] == expected_contract["indexSchemaVersion"], version
+    assert (
+        expected_contract["minimumMcpToolContractVersion"]
+        <= version["mcp_tool_contract_version"]
+        <= expected_contract["maximumMcpToolContractVersion"]
+    ), version
 
     initialized, session = post(
         port,
@@ -66,18 +90,8 @@ def main() -> None:
 
     tools, session = post(port, {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}}, session)
     names = {tool["name"] for tool in tools["result"]["tools"]}
-    expected = {
-        "wiki_search",
-        "wiki_read",
-        "wiki_list",
-        "wiki_tree",
-        "wiki_schema_report",
-        "wiki_write",
-        "wiki_capture",
-        "wiki_delete",
-        "wiki_rename",
-    }
-    assert expected <= names, names
+    expected_tools = set(expected_contract["requiredTools"])
+    assert expected_tools <= names, names
 
     searched, _ = post(
         port,
@@ -93,7 +107,7 @@ def main() -> None:
         session,
     )
     assert not searched.get("error") and not searched.get("result", {}).get("isError"), searched
-    print("container-smoke: health, version, initialize, instructions, seven tools, search ok")
+    print(f"container-smoke: health, version, initialize, instructions, {len(expected_tools)} tools, search ok")
 
 
 if __name__ == "__main__":
