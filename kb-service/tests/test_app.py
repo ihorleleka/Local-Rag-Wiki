@@ -309,8 +309,9 @@ class AppBehaviorTests(unittest.TestCase):
                 self.assertEqual(health["service"], "starting")
                 self.assertEqual(health["mcp"], "running")
                 report = await asyncio.wait_for(schema_report(), timeout=0.05)
-                self.assertEqual(report["schema_version"], 4)
-                self.assertEqual(report["total_files"], 1)
+                self.assertEqual(report["schema_version"], 7)
+                self.assertEqual(report["total_files"], 0)
+                self.assertTrue(report["audit"]["stale"])
                 release_reindex.set()
 
         asyncio.run(run_health())
@@ -374,7 +375,7 @@ class AppBehaviorTests(unittest.TestCase):
         result = asyncio.run(read_version())
         self.assertEqual(result["service"], "kb-service")
         self.assertEqual(result["index_schema_version"], 7)
-        self.assertEqual(result["mcp_tool_contract_version"], 6)
+        self.assertEqual(result["mcp_tool_contract_version"], 7)
         self.assertIsInstance(result["service_version"], str)
 
     def test_packet_search_fixtures_are_canonical_compact_and_bounded(self) -> None:
@@ -531,10 +532,53 @@ class AppBehaviorTests(unittest.TestCase):
                 return await schema_report()
 
         result = asyncio.run(run_schema_report())
-        self.assertEqual(
-            result,
-            {"schema_version": 4, "total_files": 1, "summary": {"files_with_issues": 0}, "files": []},
-        )
+        self.assertEqual(result["schema_version"], 7)
+        self.assertEqual(result["total_files"], 0)
+        self.assertEqual(result["files"], [])
+        self.assertEqual(result["audit"]["status"], "scheduled")
+        self.assertTrue(result["audit"]["stale"])
+        self.assertIn("index", result)
+
+    def test_schema_report_returns_placeholder_immediately_and_single_flights_refresh(self) -> None:
+        started = threading.Event()
+        release = threading.Event()
+
+        class SlowSchemaIndex(DummyKnowledgeIndex):
+            def __init__(self, settings):
+                super().__init__(settings)
+                self.schema_report_calls = 0
+
+            def schema_report(self):
+                self.schema_report_calls += 1
+                if self.schema_report_calls == 1:
+                    started.set()
+                    release.wait(1)
+                return {"schema_version": 4, "total_files": 1, "summary": {"files_with_issues": 0}, "files": []}
+
+        original_index_class = self.app_module.KnowledgeIndex
+        self.app_module.KnowledgeIndex = SlowSchemaIndex
+        app = self.app_module.create_app()
+        self.app_module.KnowledgeIndex = original_index_class
+        schema_report = DummyMCP.last_instance.tools[3][1]
+
+        async def run_schema_report():
+            async with app.lifespan(app):
+                first = await asyncio.wait_for(schema_report(), timeout=0.05)
+                second = await asyncio.wait_for(schema_report(), timeout=0.05)
+                await asyncio.sleep(0.01)
+                self.assertTrue(started.is_set())
+                self.assertEqual(first["schema_version"], 7)
+                self.assertEqual(first["files"], [])
+                self.assertTrue(first["audit"]["stale"])
+                self.assertEqual(second["audit"]["generation"], 1)
+                self.assertEqual(DummyKnowledgeIndex.last_instance.schema_report_calls, 1)
+                release.set()
+                await asyncio.sleep(0.05)
+                refreshed = await schema_report()
+                self.assertEqual(refreshed["schema_version"], 4)
+                self.assertFalse(refreshed["audit"]["stale"])
+
+        asyncio.run(run_schema_report())
 
     def test_write_tool_reindexes_only_on_success(self) -> None:
         app = self.app_module.create_app()

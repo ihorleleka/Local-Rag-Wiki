@@ -28,7 +28,7 @@ ARG VERSION=0.0.0
 # them as build args, then verifies the labels match the values inside the image.
 # The defaults here are a local-build fallback only.
 ARG INDEX_SCHEMA_VERSION=7
-ARG MCP_TOOL_CONTRACT_VERSION=5
+ARG MCP_TOOL_CONTRACT_VERSION=7
 LABEL org.opencontainers.image.title="kb-service" \
       org.opencontainers.image.description="Repository-scoped MCP knowledge service for Markdown wiki content." \
       org.opencontainers.image.version="${VERSION}" \

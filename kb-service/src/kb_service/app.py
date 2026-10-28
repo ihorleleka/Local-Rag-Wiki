@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import hashlib
 import json
 import logging
@@ -221,6 +222,101 @@ class IndexMutationCoordinator:
         }
 
 
+class SchemaAuditCoordinator:
+    """Caches full schema audits and runs refreshes outside MCP request latency."""
+
+    def __init__(self, index: KnowledgeIndex, settings: Settings, index_coordinator: IndexMutationCoordinator) -> None:
+        self.index = index
+        self.settings = settings
+        self.index_coordinator = index_coordinator
+        self._task: asyncio.Task | None = None
+        self._generation = 0
+        self._completed_generation = 0
+        self._state = "idle"
+        self._stale = True
+        self._last_success_utc = ""
+        self._last_failure_utc = ""
+        self._last_error = ""
+        self._report = self._empty_report()
+
+    def _empty_report(self) -> dict[str, Any]:
+        return {
+            "schema_version": INDEX_SCHEMA_VERSION,
+            "generated_utc": "",
+            "wiki_root": str(self.settings.wiki_root),
+            "total_files": 0,
+            "summary": {
+                "packet_files": 0,
+                "oversized_files": 0,
+                "max_note_lines": 0,
+                "files_with_issues": 0,
+                "issue_count": 0,
+                "by_kind": {},
+                "by_status": {},
+            },
+            "files": [],
+        }
+
+    def schedule_refresh(self) -> None:
+        """Start at most one stale audit; callers never await filesystem work."""
+        if not self._stale or (self._task is not None and not self._task.done()):
+            return
+        self._generation += 1
+        self._state = "scheduled"
+        self._task = asyncio.create_task(self._refresh(self._generation))
+
+    def invalidate(self) -> None:
+        """Mark cached findings stale and refresh them in the background."""
+        self._stale = True
+        self.schedule_refresh()
+
+    async def _refresh(self, generation: int) -> None:
+        while True:
+            self._state = "running"
+            self._stale = False
+            try:
+                report = await asyncio.to_thread(self.index.schema_report)
+            except Exception as error:
+                self._stale = True
+                self._last_failure_utc = datetime.now(timezone.utc).isoformat()
+                self._last_error = str(error)
+                self._state = "error"
+                LOGGER.exception("Wiki schema audit failed")
+                return
+            self._report = report
+            self._completed_generation = generation
+            self._last_success_utc = datetime.now(timezone.utc).isoformat()
+            self._last_error = ""
+            if not self._stale:
+                self._state = "idle"
+                return
+            generation += 1
+            self._generation = generation
+
+    def snapshot(self) -> dict[str, Any]:
+        report = copy.deepcopy(self._report)
+        report["audit"] = {
+            "status": self._state,
+            "generation": self._generation,
+            "completed_generation": self._completed_generation,
+            "last_success_utc": self._last_success_utc,
+            "last_failure_utc": self._last_failure_utc,
+            "last_error": self._last_error,
+            "stale": self._stale,
+        }
+        report["index"] = self.index_coordinator.snapshot()
+        return report
+
+    async def stop(self) -> None:
+        if self._task is None or self._task.done():
+            return
+        self._task.cancel()
+        try:
+            await self._task
+        except asyncio.CancelledError:
+            pass
+
+
 def service_is_healthy(index_state: dict[str, Any], mcp_running: bool) -> bool:
     return (
         bool(index_state["last_success_utc"])
@@ -336,6 +432,7 @@ def create_app():
     startup_task = None
     mcp_runtime: dict[str, bool] = {"running": False}
     coordinator = IndexMutationCoordinator(index)
+    audit_coordinator = SchemaAuditCoordinator(index, settings, coordinator)
     watch_state: dict[str, Any] = {"signature": {}}
 
     mcp = FastMCP("repo-knowledge", instructions=MCP_INSTRUCTIONS)
@@ -355,6 +452,7 @@ def create_app():
             watch_state["signature"] = current
             if changed:
                 await coordinator.request_reindex("watcher", paths=changed, wait=False)
+                audit_coordinator.invalidate()
 
     async def startup_reindex_loop():
         result = await coordinator.request_reindex("startup")
@@ -383,6 +481,7 @@ def create_app():
                     startup_task.cancel()
                 if watcher_task:
                     watcher_task.cancel()
+                await audit_coordinator.stop()
                 await coordinator.stop()
                 mcp_runtime["running"] = False
 
@@ -513,22 +612,13 @@ def create_app():
 
     @mcp.tool()
     async def wiki_schema_report():
-        """Report typed note schema health, packet gaps, stale verification, oversized notes, duplicate ids, and broken wiki links. Returns a time-bounded result when a full audit exceeds its time budget."""
-        # Audit the filesystem directly even while indexing. Results are
-        # intentionally eventually consistent with search, but remain useful.
-        timeout_seconds = max(1, int(getattr(settings, "schema_report_timeout_seconds", 10)))
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(index.schema_report),
-                timeout=timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            return {
-                "status": "timed_out",
-                "retry_after_seconds": 5,
-                "message": "The schema audit exceeded its time budget; the wiki remains reachable, so continue with focused retrieval and retry the audit later.",
-                "index": coordinator.snapshot(),
-            }
+        """Return the last schema audit immediately and refresh it in the background.
+
+        The response always has the full report shape. ``audit.stale`` signals
+        that the detailed findings are pending or were retained after an error.
+        """
+        audit_coordinator.schedule_refresh()
+        return audit_coordinator.snapshot()
 
     @mcp.tool()
     async def wiki_write(path: str, content: str):
@@ -542,6 +632,7 @@ def create_app():
             )
             result["index_status"] = index_result["status"]
             result["index_generation"] = index_result["generation"]
+            audit_coordinator.invalidate()
         return result
 
     @mcp.tool()
@@ -556,6 +647,7 @@ def create_app():
             )
             result["index_status"] = index_result["status"]
             result["index_generation"] = index_result["generation"]
+            audit_coordinator.invalidate()
         return result
 
     @mcp.tool()
@@ -570,6 +662,7 @@ def create_app():
             )
             result["index_status"] = index_result["status"]
             result["index_generation"] = index_result["generation"]
+            audit_coordinator.invalidate()
         return result
 
     @mcp.tool()
@@ -614,6 +707,7 @@ def create_app():
             )
             result["index_status"] = index_result["status"]
             result["index_generation"] = index_result["generation"]
+            audit_coordinator.invalidate()
         return result
 
     mcp_app = mcp.http_app(path="/")
