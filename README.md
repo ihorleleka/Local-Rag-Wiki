@@ -31,9 +31,8 @@ per repository when a configured agent client connects. Pre-pulling the image
 
 ## DeepSeek Harness
 
-The native bundle supports DSH `>=0.2.0-rc.2 <0.3.0-0`, including the
-currently published `0.2.1` alpha releases. A DSH `0.3.0` prerelease or later
-requires a compatible wiki-kit release.
+The native bundle supports DSH `>=0.2.1-rc.5 <0.3.0-0`. A DSH `0.3.0`
+prerelease or later requires a compatible wiki-kit release.
 
 Install the native DSH bundle once into the profile you use (usually `web`):
 
@@ -42,22 +41,23 @@ dsh plugin --profile web add github:ihorleleka/Local-Rag-Wiki
 ```
 
 Restart that DSH profile, open an installed repository as its workspace, and
-start a session. On DSH's native `agent/created` lifecycle, the bundle compares
-the wiki-kit package version of the installed profile plugin—not the DSH runtime
-version—with the workspace install marker. When the plugin version is newer, it
-runs the workspace's `.agents/update-wiki-kit.cmd` on Windows or
+start a session. Opening the session alone does not start the wiki bridge. When
+the first direct user prompt is submitted, the bundle compares the wiki-kit
+package version of the installed profile plugin—not the DSH runtime version—with
+the workspace install marker. When the plugin version is newer, it runs the
+workspace's `.agents/update-wiki-kit.cmd` on Windows or
 `.agents/update-wiki-kit.sh` on macOS/Linux once; the updated marker prevents
 another run for that plugin version. It then reads the active workspace's
 `.dsh/mcp.servers.yml`, validates its `wiki-manager` entry against the managed
 install marker, resolves the configured `node` executable through DSH's
 subprocess service, and mounts the bridge through `agent.ctx`. It never uses
 `process.execPath`, because that is the Electron executable in DSH Desktop.
-When Docker is reachable, initial
-discovery finishes before the model request is assembled, exposing stable native
-`mcp__wiki-manager__*` tools on that agent's tool scope. If Docker Desktop is
-still starting, the session remains usable and the bridge retries in the
-background until it can register those tools. Identical namespaces can coexist
-in different agent scopes without leaking tools between sessions.
+When Docker is reachable, initial discovery finishes before the model request is
+assembled, exposing stable native `mcp__wiki-manager__*` tools on that agent's
+tool scope. If Docker Desktop is still starting, the session remains usable and
+the bridge retries in the background until it can register those tools.
+Identical namespaces can coexist in different agent scopes without leaking tools
+between sessions.
 
 The scoped bridge source is delivered as `.dsh/.dsh-mcp-client.js` (never at
 repository root) and follows DSH's MCP transport, reconnect, tool-schema, and
@@ -66,16 +66,19 @@ legacy `dsh/mcp.servers.yml` is accepted only when the canonical file is absent.
 DSH core does not auto-load this file—the trusted profile bundle is its loader.
 Do not add a second global MCP client for the same server.
 
-The bundle also performs bounded wiki recall once per turn for a material,
-direct user prompt. Tool results, plugin context, delegated control messages,
-and later tool-loop steps do not trigger recall. After the scoped bridge is
-ready, `agent/pre-step` dispatches `wiki_search` through DSH's existing tool
-registry—first `depth="abstract"` (L0), then matching `depth="packet"` context
-(L1). It does not spawn a second runner. Recall is per-workspace cached and
-in-flight deduplicated, L1 packets are rate-limited, and full L2 `wiki_read`
-remains model-directed. Injected recall is turn-scoped; when the turn stops,
-its payload is replaced by a small expiry marker so it cannot accumulate or
-silently govern later turns.
+Wiki recall is context-bounded. Prefix a prompt with `$wiki ` to opt in
+unconditionally, for example `$wiki explain the deployment architecture`.
+Otherwise, the first direct prompt performs one L0 candidate search and injects
+it only when the service returns evidence with `relevance_score >= 0.5`.
+Candidate and injected L0 results use three matches and are capped at 900
+characters—about 225 tokens by the recorded estimate. It never automatically
+preloads L1 packets; additional detail is a
+model-directed `wiki_search` or `wiki_read` decision. Recall is cached and
+in-flight deduplicated per workspace. It is turn-scoped: when the turn stops,
+the evidence is replaced by an empty, non-model-visible surface event, so it
+cannot accumulate in later model requests. Recall diagnostics track skipped
+ordinary prompts, explicit requests, cache hits, context characters, estimated
+injected tokens, and budget truncations.
 
 The governed wiki and its MCP search are the only DSH memory path; the bundle
 does not capture local prompt history. Claude Code connects to the same runner

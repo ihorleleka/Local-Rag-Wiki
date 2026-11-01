@@ -32,6 +32,7 @@
         result_count: 1,
         depth: request.params.arguments?.depth,
         query: request.params.arguments?.query,
+        relevance_score: String(request.params.arguments?.query || '').includes('high confidence') ? 0.8 : 0.2,
         source: 'architecture.md',
         abstract: 'Lifecycle MCP verification result.',
       }),

@@ -9,7 +9,7 @@ const ROOT = path.resolve(__dirname, '..')
 const SCRATCH = path.join(ROOT, '.artifacts', 'verify-dsh-mcp')
 const LOADER = path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'workspace-mcp.mjs')
 const CLIENT = path.join(ROOT, 'templates', 'root', '.dsh', '.dsh-mcp-client.js')
-const DSH_COMPATIBILITY_RANGE = '>=0.2.0-rc.2 <0.3.0-0'
+const DSH_COMPATIBILITY_RANGE = '>=0.2.1-rc.5 <0.3.0-0'
 const DSH_RUNTIME_PEERS = [
   '@deepseek-ai/dsh',
   '@deepseek-ai/dsh-attachment',
@@ -155,8 +155,48 @@ async function assertDockerUnavailableStatusMessage() {
   assert.equal(mcpClient.connectionErrorMessage(new Error('ordinary connection failure')), 'ordinary connection failure')
 }
 
+async function assertBoundedExplicitRecall() {
+  const recall = await import(pathToFileURL(path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'recall.mjs')).href)
+  const workspace = path.join(SCRATCH, 'bounded-explicit-recall')
+  const calls = []
+  const search = async args => {
+    calls.push(args)
+    return JSON.stringify({ result_count: 1, abstract: 'x'.repeat(2000) })
+  }
+  const first = await recall.retrieveWikiTiers(workspace, 'architecture', new AbortController().signal, search)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0], { query: 'architecture', depth: 'abstract', top_k: 3 })
+  assert(first.abstract.length <= 912, 'L0 retrieval must be character-bounded')
+  const second = await recall.retrieveWikiTiers(workspace, 'architecture', new AbortController().signal, search)
+  assert.equal(second.abstract, first.abstract)
+  const metrics = recall.recallMetrics(workspace)
+  assert.equal(metrics.cacheHits, 1)
+  assert.equal(metrics.budgetTruncations, 1)
+
+  const automaticWorkspace = path.join(SCRATCH, 'confidence-gated-recall')
+  const lowConfidence = await recall.retrieveWikiTiers(
+    automaticWorkspace,
+    'ordinary prompt',
+    new AbortController().signal,
+    async () => JSON.stringify({ result_count: 1, results: [{ relevance_score: 0.49 }] }),
+    { explicit: false },
+  )
+  assert.equal(lowConfidence, undefined)
+  const highConfidence = await recall.retrieveWikiTiers(
+    automaticWorkspace,
+    'high confidence prompt',
+    new AbortController().signal,
+    async () => JSON.stringify({ result_count: 1, results: [{ relevance_score: 0.5 }] }),
+    { explicit: false },
+  )
+  assert(highConfidence?.abstract, 'a 0.5 relevance score must inject automatic L0 context')
+  const automaticMetrics = recall.recallMetrics(automaticWorkspace)
+  assert.equal(automaticMetrics.automaticRequests, 2)
+  assert.equal(automaticMetrics.confidenceSkipped, 1)
+}
+
 async function assertLifecycleIntegration() {
-  const [{ Context }, { default: toolsPlugin }, { default: systemPromptPlugin }, { createScope }, { Session }, { createUserMessage }, lifecycle] = await Promise.all([
+  const [{ Context }, { default: toolsPlugin }, { default: systemPromptPlugin }, { createScope }, { Session }, { createUserMessage }, lifecycle, recall] = await Promise.all([
     import('@deepseek-ai/cordis'),
     import('@deepseek-ai/dsh-tools'),
     import('@deepseek-ai/dsh-system-prompt'),
@@ -164,6 +204,7 @@ async function assertLifecycleIntegration() {
     import('@deepseek-ai/dsh-session'),
     import('@deepseek-ai/dsh-llm'),
     import(pathToFileURL(path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'index.mjs')).href),
+    import(pathToFileURL(path.join(ROOT, 'packages', 'dsh-local-rag-wiki', 'recall.mjs')).href),
   ])
   const workspace = path.join(SCRATCH, 'lifecycle-integration')
   const agentsRoot = path.join(workspace, '.agents')
@@ -194,25 +235,66 @@ async function assertLifecycleIntegration() {
 
   try {
     await ctx.parallel('agent/created', { agent })
-    assert.deepEqual(tools.schemas(agent).map(tool => tool.name), ['mcp__wiki-manager__wiki_search'])
+    assert.deepEqual(
+      tools.schemas(agent).map(tool => tool.name),
+      [],
+      'opening an agent must not start or register the workspace MCP server',
+    )
+    const nonPromptMessages = [createUserMessage({
+      content: [{ type: 'text', text: 'tool continuation without a submitted user prompt' }],
+      source: { kind: 'tool', callId: 'pre-prompt-tool' },
+    })]
+    await ctx.waterfall(
+      'agent/pre-step',
+      { agent, messages: nonPromptMessages, turn: 0, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: nonPromptMessages }),
+    )
+    assert.deepEqual(
+      tools.schemas(agent).map(tool => tool.name),
+      [],
+      'non-user work must not start the workspace MCP server',
+    )
     const prompt = 'Explain the project architecture and component rendering behavior in detail'
+    const genericMessages = [createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } })]
+    const genericDecision = await ctx.waterfall(
+      'agent/pre-step',
+      { agent, messages: genericMessages, turn: 1, step: 1, signal: new AbortController().signal },
+      async () => ({ kind: 'enter', messages: genericMessages }),
+    )
+    assert.equal(genericDecision.messages.length, 1, 'low-confidence prompts must not inject wiki context')
+    assert.deepEqual(tools.schemas(agent).map(tool => tool.name), ['mcp__wiki-manager__wiki_search'])
+    assert.equal(recall.recallMetrics(workspace).automaticRequests, 1)
+    assert.equal(recall.recallMetrics(workspace).confidenceSkipped, 1)
+    assert.equal(recall.explicitWikiQuery('$wiki architecture'), 'architecture')
+    assert.equal(recall.explicitWikiQuery('please use $wiki architecture'), undefined)
+    assert.equal(recall.explicitWikiQuery('$wiki'), undefined)
+
     const messages = [
-      createUserMessage({ content: [{ type: 'text', text: prompt }], source: { kind: 'user' } }),
+      createUserMessage({ content: [{ type: 'text', text: `$wiki ${prompt}` }], source: { kind: 'user' } }),
       createUserMessage({ content: [{ type: 'text', text: 'tool output must not become the recall query' }], source: { kind: 'tool', callId: 'prior-tool' } }),
     ]
     const decision = await ctx.waterfall(
       'agent/pre-step',
-      { agent, messages, turn: 1, step: 1, signal: new AbortController().signal },
+      { agent, messages, turn: 2, step: 1, signal: new AbortController().signal },
       async () => ({ kind: 'enter', messages }),
     )
+    assert.deepEqual(tools.schemas(agent).map(tool => tool.name), ['mcp__wiki-manager__wiki_search'])
     assert.equal(decision.messages.length, 3)
     assert.match(decision.messages[2].content[0].text, /Lifecycle MCP verification result/)
     assert.match(decision.messages[2].content[0].text, new RegExp(prompt))
+    assert.doesNotMatch(decision.messages[2].content[0].text, /\$wiki/)
+    assert.doesNotMatch(decision.messages[2].content[0].text, /"depth":"packet"/)
+    assert(decision.messages[2].content[0].text.length <= 1300, 'automatic context must fit the bounded L0 budget')
     assert.doesNotMatch(decision.messages[2].content[0].text, /tool output must not become the recall query/)
+    const recallAfterExplicit = recall.recallMetrics(workspace)
+    assert.equal(recallAfterExplicit.explicitRequests, 1)
+    assert.equal(recallAfterExplicit.abstractQueries, 2)
+    assert.equal(recallAfterExplicit.injectedChars, decision.messages[2].content[0].text.length)
+    assert(recallAfterExplicit.estimatedInjectedTokens <= 325)
 
     const repeated = await ctx.waterfall(
       'agent/pre-step',
-      { agent, messages: [messages[0]], turn: 1, step: 1, signal: new AbortController().signal },
+      { agent, messages: [messages[0]], turn: 2, step: 1, signal: new AbortController().signal },
       async () => ({ kind: 'enter', messages: [messages[0]] }),
     )
     assert.equal(repeated.messages.length, 1, 'one turn must not run or inject recall twice')
@@ -223,26 +305,28 @@ async function assertLifecycleIntegration() {
     })]
     const continuation = await ctx.waterfall(
       'agent/pre-step',
-      { agent, messages: toolStep, turn: 1, step: 2, signal: new AbortController().signal },
+      { agent, messages: toolStep, turn: 2, step: 2, signal: new AbortController().signal },
       async () => ({ kind: 'enter', messages: toolStep }),
     )
     assert.equal(continuation.messages.length, 1, 'tool-loop steps must not trigger recall')
 
     for (const message of decision.messages) session.append('user/message', message, { surfaceOp: 'append' })
     assert.match(session.deriveMessages().at(-1).content[0].text, /Lifecycle MCP verification result/)
-    await ctx.serial('agent/turn-stopping', { agent, turn: 1, signal: new AbortController().signal })
+    await ctx.serial('agent/turn-stopping', { agent, turn: 2, signal: new AbortController().signal })
     const visibleRecall = session.deriveMessages().filter(message => message.source?.kind === 'local-rag-wiki')
-    assert.equal(visibleRecall.length, 1, 'recall projection must occupy one visible surface slot')
-    assert.match(visibleRecall[0].content[0].text, /state="expired"/)
-    assert.doesNotMatch(visibleRecall[0].content[0].text, /Lifecycle MCP verification result/)
+    assert.equal(visibleRecall.length, 0, 'expired recall must not remain model-visible')
+    assert.doesNotMatch(
+      session.deriveMessages().flatMap(message => message.content).map(block => block.text || '').join('\n'),
+      /<wiki-kit-context|Lifecycle MCP verification result/,
+    )
 
     const nextPrompt = createUserMessage({
-      content: [{ type: 'text', text: 'Review the deployment architecture and service boundaries' }],
+      content: [{ type: 'text', text: '$wiki Review the deployment architecture and service boundaries' }],
       source: { kind: 'user' },
     })
     const nextTurn = await ctx.waterfall(
       'agent/pre-step',
-      { agent, messages: [nextPrompt], turn: 2, step: 1, signal: new AbortController().signal },
+      { agent, messages: [nextPrompt], turn: 3, step: 1, signal: new AbortController().signal },
       async () => ({ kind: 'enter', messages: [nextPrompt] }),
     )
     assert.equal(nextTurn.messages.length, 2, 'a new direct-user turn may retrieve once')
@@ -335,6 +419,7 @@ async function main() {
   await assertDockerUnavailableStatusMessage()
   await assertWorkspaceUpgrade()
   await assertScopedBridge()
+  await assertBoundedExplicitRecall()
   await assertLifecycleIntegration()
   console.log('verify-dsh-mcp: ok')
 }

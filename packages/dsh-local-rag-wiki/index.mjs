@@ -1,7 +1,7 @@
 import * as mcpClient from '../../templates/root/.dsh/.dsh-mcp-client.js'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { retrieveWikiTiers, shouldRetrieve } from './recall.mjs'
-import { keywords, textFrom } from './text.mjs'
+import { createDeveloperMessage, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { explicitWikiQuery, noteAutomaticSkip, recordInjectedContext, retrieveWikiTiers } from './recall.mjs'
+import { textFrom } from './text.mjs'
 import path from 'node:path'
 import { loadWorkspaceWikiMcp } from './workspace-mcp.mjs'
 import { upgradeWorkspaceIfNeeded } from './workspace-upgrade.mjs'
@@ -17,10 +17,10 @@ function workspaceOf(agentOrSession) {
     || agentOrSession?.cwd
 }
 
-function lifecycleMessage(text, turn, state = 'active') {
+function lifecycleMessage(text, turn, step) {
   return createUserMessage({
     content: [{ type: 'text', text }],
-    source: { kind: MESSAGE_SOURCE_KIND, form: 'wiki-recall', state, turn },
+    source: { kind: MESSAGE_SOURCE_KIND, form: 'wiki-recall', state: 'active', turn, step },
   })
 }
 
@@ -51,13 +51,19 @@ function activeRecallEvent(agent, turn) {
 function expireWikiContext(agent, turn) {
   const event = activeRecallEvent(agent, turn)
   if (!event || typeof agent.session.append !== 'function') return false
+  // The public Session surface supports replacement, not deletion. Replace the
+  // recall with an empty developer event: it shadows the evidence in the durable
+  // surface while deriving to no model-visible message.
   agent.session.append(
-    'user/message',
-    lifecycleMessage(
-      '<wiki-kit-context source="dsh-local-rag-wiki" state="expired">Automatic wiki recall is turn-scoped; no recalled context is active.</wiki-kit-context>',
-      event.data.source.turn,
-      'expired',
-    ),
+    'developer/message',
+    {
+      turn: event.data.source.turn,
+      step: event.data.source.step || 1,
+      message: createDeveloperMessage({
+        content: [],
+        source: { kind: MESSAGE_SOURCE_KIND, form: 'wiki-recall', state: 'expired', turn: event.data.source.turn },
+      }),
+    },
     {
       surfaceOp: { op: 'replace', startSeq: event.seq, endSeq: event.seq },
       sourceEventSeqs: [event.seq],
@@ -192,10 +198,6 @@ export function apply(ctx) {
     return ready
   }
 
-  // DSH awaits agent/created before releasing queued work, so this is the
-  // supported startup edge for the workspace check and MCP registration.
-  ctx.on('agent/created', ({ agent }) => mountWikiMcp(agent))
-
   ctx.on('agent/disposed', ({ agent }) => {
     // The child plugin is owned by agent.ctx and is already unwound before this
     // event; these maps only release coordinator references.
@@ -206,22 +208,33 @@ export function apply(ctx) {
 
   ctx.on('agent/turn-stopping', ({ agent, turn }) => {
     // Recall is request context, not durable conversation history. Replace the
-    // active payload with a tiny expiry marker once the turn has finished.
+    // active payload with a non-model-visible tombstone once the turn has finished.
     expireWikiContext(agent, turn)
   })
 
   ctx.on('agent/pre-step', async (payload, next) => {
-    // Tool schemas are frozen later in the step. Wait for initial MCP discovery
-    // here so the active model's first request already sees the workspace tools.
-    const ready = mountWikiMcp(payload.agent)
-    if (ready) await ready
+    // Do not start a workspace MCP process merely because its agent was opened.
+    // This is the first edge where an actual direct user prompt is being sent;
+    // tool schemas are frozen later in the step, so await the lazy mount before
+    // the model's first request is composed.
+    const directPrompt = payload.step === 1 && directUserPrompt(payload.messages)
+    const explicitQuery = explicitWikiQuery(directPrompt)
+    const hasWikiDirective = /^\s*\$wiki(?:\s|$)/i.test(directPrompt || '')
+    // `$wiki` bypasses score gating. Otherwise, use the submitted prompt as a
+    // cheap L0 candidate query and inject it only when evidence scores >= 0.5.
+    const prompt = explicitQuery || (hasWikiDirective ? undefined : directPrompt)
+    const workspace = workspaceOf(payload.agent)
+    if (directPrompt && !prompt && workspace) noteAutomaticSkip(workspace)
+    // Candidate confidence is returned by wiki_search, so a direct prompt must
+    // mount the workspace tool before the first model request is composed.
+    if (directPrompt) {
+      const ready = mountWikiMcp(payload.agent)
+      if (ready) await ready
+    }
     const decision = await next()
     if (decision.kind === 'reject' || payload.step !== 1) return decision
 
-    const prompt = directUserPrompt(payload.messages)
-    const workspace = workspaceOf(payload.agent)
     if (!workspace || !prompt || recalledTurns.get(payload.agent.id) === payload.turn) return decision
-    if (!shouldRetrieve(prompt, keywords(prompt).length)) return decision
 
     // Clean up an active snapshot left by an aborted/error turn before starting
     // another retrieval. Mark before I/O so one turn never retries recall.
@@ -232,14 +245,16 @@ export function apply(ctx) {
       prompt,
       payload.signal,
       arguments_ => executeWikiSearch(payload.agent, payload, arguments_),
+      { explicit: Boolean(explicitQuery) },
     )
     const context = wikiContext(retrieval)
     if (!context) return decision
+    recordInjectedContext(workspace, context)
     return {
       ...decision,
       messages: [
         ...decision.messages.filter(message => !isPluginMessage(message)),
-        lifecycleMessage(context, payload.turn),
+        lifecycleMessage(context, payload.turn, payload.step),
       ],
     }
   })
