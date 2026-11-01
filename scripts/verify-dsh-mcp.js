@@ -176,23 +176,53 @@ async function assertBoundedExplicitRecall() {
   const automaticWorkspace = path.join(SCRATCH, 'confidence-gated-recall')
   const lowConfidence = await recall.retrieveWikiTiers(
     automaticWorkspace,
-    'ordinary prompt',
+    'project architecture boundaries',
     new AbortController().signal,
-    async () => JSON.stringify({ result_count: 1, results: [{ relevance_score: 0.49 }] }),
+    async () => JSON.stringify({ results: [{ relevance_score: 0.49, abstract: 'project architecture boundaries' }] }),
     { explicit: false },
   )
   assert.equal(lowConfidence, undefined)
-  const highConfidence = await recall.retrieveWikiTiers(
+  const ungrounded = await recall.retrieveWikiTiers(
     automaticWorkspace,
-    'high confidence prompt',
+    'check automatic recall scores for messages',
     new AbortController().signal,
-    async () => JSON.stringify({ result_count: 1, results: [{ relevance_score: 0.5 }] }),
+    async () => JSON.stringify({ results: [{ relevance_score: 1, abstract: 'Deployment handbook and release headings' }] }),
     { explicit: false },
   )
-  assert(highConfidence?.abstract, 'a 0.5 relevance score must inject automatic L0 context')
+  assert.equal(ungrounded, undefined, 'a high relative rank alone must not inject unrelated wiki context')
+  const grounded = await recall.retrieveWikiTiers(
+    automaticWorkspace,
+    'project architecture boundaries',
+    new AbortController().signal,
+    async () => JSON.stringify({ results: [
+      { relevance_score: 0.5, abstract: 'project architecture boundaries and module ownership' },
+      { relevance_score: 0.99, abstract: 'unrelated deployment handbook' },
+    ] }),
+    { explicit: false },
+  )
+  assert(grounded?.abstract, 'a grounded 0.5 result must inject automatic L0 context')
+  const injected = JSON.parse(grounded.abstract)
+  assert.equal(injected.results.length, 1, 'a qualified result must not license unrelated companions')
+  const explicitWeak = await recall.retrieveWikiTiers(
+    automaticWorkspace,
+    'same weak query',
+    new AbortController().signal,
+    async () => JSON.stringify({ results: [{ relevance_score: 0.1, abstract: 'unrelated note' }] }),
+    { explicit: true },
+  )
+  assert(explicitWeak?.abstract, 'explicit wiki requests retain the user override')
+  const automaticAfterExplicit = await recall.retrieveWikiTiers(
+    automaticWorkspace,
+    'same weak query',
+    new AbortController().signal,
+    async () => JSON.stringify({ results: [{ relevance_score: 0.1, abstract: 'unrelated note' }] }),
+    { explicit: false },
+  )
+  assert.equal(automaticAfterExplicit, undefined, 'explicit-cache entries must not bypass automatic policy')
   const automaticMetrics = recall.recallMetrics(automaticWorkspace)
-  assert.equal(automaticMetrics.automaticRequests, 2)
-  assert.equal(automaticMetrics.confidenceSkipped, 1)
+  assert.equal(automaticMetrics.automaticRequests, 4)
+  assert.equal(automaticMetrics.confidenceSkipped, 2)
+  assert.equal(automaticMetrics.groundingSkipped, 1)
 }
 
 async function assertLifecycleIntegration() {

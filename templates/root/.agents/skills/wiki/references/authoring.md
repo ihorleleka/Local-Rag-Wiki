@@ -21,6 +21,22 @@ Correct decision-changing stale guidance promptly. Batch other durable findings
 at coherent milestones, not after each agent message or test run. Keep costly
 unresolved findings pending with a verification path; repetition is not verification.
 
+## Substantive-Task Disposition and Maintain/Promote
+
+For each substantive task where knowledge was material, record a concise
+**disposition** in the completion record: eligible finding (or none), canonical
+owner, evidence, generalization/coverage, and either the write receipt (path,
+result, checks) or a specific no-write reason. A no-write is valid for an
+already-accurate owner, insufficient evidence, task-local detail, or a finding
+that does not generalize.
+
+Use the bounded **Maintain/Promote** route only at a coherent milestone, a
+material domain/contract change, or an explicitly queued knowledge-backlog item.
+**Maintain** reviews the affected canonical owner; **Promote** verifies a related
+pending investigation, then promotes only its supported reusable conclusion—or
+retains or deletes it. Do not sweep unrelated notes, use file-count quotas, or
+automatically capture raw prompts, chat, logs, or working briefs.
+
 ## Specificity And Generalization
 
 Choose the target before drafting:
@@ -208,13 +224,12 @@ durable knowledge rather than source-by-source narration:
 ## Write Safely and Validate
 
 Use the capability mode established by the skill. In managed mode, read the
-current note and preserve its `content_hash`. Write with
-`wiki_write(expected_hash: ...)`; on conflict, re-read and merge rather than
-dropping the guard. New notes may omit the hash only when absent. Use native
-delete/rename with the latest source hash and reconcile reported inbound links.
-Permission denials, validation errors, and hash conflicts do not justify bypassing
-managed writes with direct edits. After an ambiguous failure, check whether the
-write applied before retrying.
+current note immediately before an update and coordinate one writer per owner;
+then use the native write/delete/rename operation. Atomic replacement does not
+provide optimistic concurrency, so re-read and merge if another writer changes
+the note before completion. Permission denials and validation errors do not
+justify bypassing managed writes with direct edits. After an ambiguous failure,
+check whether the write applied before retrying.
 
 In local-file mode, coordinate one writer per note, re-read immediately before
 editing, and merge intervening changes. Before deleting/renaming, inspect and

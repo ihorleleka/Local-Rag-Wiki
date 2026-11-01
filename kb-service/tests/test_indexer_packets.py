@@ -396,7 +396,7 @@ Covers the scheduler retry path only; queue consumers not audited.
         self.assertTrue(module._path_within_scope("components/page.md", "components/page.md"))
         self.assertFalse(module._path_within_scope("components/page.md", "components/other.md"))
 
-    def test_capture_writes_pending_investigation_and_replaces_on_repeat(self) -> None:
+    def test_capture_writes_pending_investigation_without_overwriting_repeat(self) -> None:
         with TemporaryDirectory() as tmpdir:
             wiki_root = Path(tmpdir) / "wiki"
             wiki_root.mkdir()
@@ -432,12 +432,24 @@ Covers the scheduler retry path only; queue consumers not audited.
             )
             self.assertIsNotNone(packet)
 
-            conflict = index.capture(
+            repeated = index.capture(
                 title="Flaky Retry Root Cause",
                 context="Second attempt.",
                 findings=["Different finding."],
             )
-            self.assertEqual(conflict["status"], "ok")
+            self.assertEqual(repeated["status"], "ok")
+            self.assertEqual(repeated["path"], "investigations/flaky-retry-root-cause-2.md")
+            self.assertIn("Different finding.", (wiki_root / repeated["path"]).read_text(encoding="utf-8"))
+            self.assertIn("Backoff timer was never reset.", written)
+
+            explicit_conflict = index.capture(
+                title="Flaky Retry Root Cause",
+                context="Explicit destination.",
+                findings=["Must not replace."],
+                path="investigations/flaky-retry-root-cause.md",
+            )
+            self.assertEqual(explicit_conflict["status"], "conflict")
+            self.assertEqual(explicit_conflict["reason"], "destination_exists")
 
     def test_tree_reports_navigable_structure_from_manifest(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1100,10 +1112,10 @@ class WikiPathSafetyTests(unittest.TestCase):
             self.assertEqual(read["content"], "# Safe\n")
             self.assertEqual((wiki_root / "components" / "test.md").read_text(encoding="utf-8"), "# Safe\n")
 
-    def test_stale_concurrent_writer_cannot_overwrite_newer_content(self) -> None:
+    def test_concurrent_uncoordinated_writers_remain_atomic(self) -> None:
         with TemporaryDirectory() as tmpdir:
             index, _ = self.make_index(Path(tmpdir))
-            created = index.write_doc("owner.md", "version one")
+            index.write_doc("owner.md", "version one")
             barrier = Barrier(2)
 
             def write(content: str):
@@ -1113,8 +1125,6 @@ class WikiPathSafetyTests(unittest.TestCase):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 results = list(executor.map(write, ["version two-a", "version two-b"]))
 
-            # Lock-free optimistic writes favor availability: both callers may
-            # commit, and the last atomic replacement wins.
             self.assertEqual(sorted(result["status"] for result in results), ["ok", "ok"])
             final = index.read_doc("owner.md")
             self.assertIn(final["content"], {"version two-a", "version two-b"})

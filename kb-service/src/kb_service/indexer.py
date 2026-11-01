@@ -389,8 +389,10 @@ class KnowledgeIndex:
         self.client = chromadb.PersistentClient(path=str(self.settings.kb_root / "chroma"))
         self.collection = self.client.get_or_create_collection("wiki_chunks", metadata={"hnsw:space": "cosine"})
         self.provider = OnnxMiniLmProvider(settings.embedding_model)
-        # Document writes use atomic filesystem operations and indexing is
-        # asynchronous; MCP calls do not wait on process-wide locks.
+        # Document mutations are serialized within this service process so
+        # generated capture paths cannot race. Filesystem replacement provides
+        # atomic visibility to external readers.
+        self._document_mutation_lock = threading.RLock()
         self._lexical_cache: dict[str, Any] | None = None
         self._evidence_inspector: EvidenceInspector | None = None
         self.reranker = load_reranker(settings)
@@ -1924,20 +1926,34 @@ class KnowledgeIndex:
             return {"status": "error", "reason": "title_required"}
         capture_dir = str(getattr(self.settings, "capture_dir", "investigations")).strip("/") or "investigations"
         slug = _slugify_note_title(title)
-        rel_path = str(path).replace("\\", "/").strip("/") if path else f"{capture_dir}/{slug}.md"
-        content = self.compose_investigation_note(
-            title=title,
-            context=context,
-            findings=findings,
-            use_this_when=use_this_when,
-            eliminated_approaches=eliminated_approaches,
-            scope_and_completeness=scope_and_completeness,
-            evidence=evidence,
-            retrieval_hints=retrieval_hints,
-            applies_to=applies_to,
-            note_id=slug,
-        )
-        result = self.write_doc(rel_path, content)
+        with self._document_mutation_lock:
+            if path:
+                rel_path = str(path).replace("\\", "/").strip("/")
+                target = self._resolve_wiki_markdown_path(rel_path)
+                if target.exists():
+                    return {"status": "conflict", "reason": "destination_exists", "path": rel_path}
+                note_id = slug
+            else:
+                suffix = 1
+                while True:
+                    note_id = slug if suffix == 1 else f"{slug}-{suffix}"
+                    rel_path = f"{capture_dir}/{note_id}.md"
+                    if not self._resolve_wiki_markdown_path(rel_path).exists():
+                        break
+                    suffix += 1
+            content = self.compose_investigation_note(
+                title=title,
+                context=context,
+                findings=findings,
+                use_this_when=use_this_when,
+                eliminated_approaches=eliminated_approaches,
+                scope_and_completeness=scope_and_completeness,
+                evidence=evidence,
+                retrieval_hints=retrieval_hints,
+                applies_to=applies_to,
+                note_id=note_id,
+            )
+            result = self.write_doc(rel_path, content)
         if result.get("status") == "ok":
             result["kind"] = "investigation"
             result["note_status"] = "pending"
@@ -1975,11 +1991,10 @@ class KnowledgeIndex:
 
     def write_doc(self, rel_path: str, content: str) -> dict[str, Any]:
         target = self._resolve_wiki_markdown_path(rel_path)
-        atomic_write_text(target, content)
-        return {
-            "status": "ok",
-            "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
-        }
+        canonical_path = target.relative_to(self.settings.wiki_root.resolve()).as_posix()
+        with self._document_mutation_lock:
+            atomic_write_text(target, content)
+        return {"status": "ok", "path": canonical_path}
 
     @staticmethod
     def _link_targets_path(link: str, rel_path: str) -> bool:
@@ -2004,25 +2019,24 @@ class KnowledgeIndex:
 
     def delete_doc(self, rel_path: str) -> dict[str, Any]:
         target = self._resolve_wiki_markdown_path(rel_path)
-        if not target.exists():
-            return {
-                "status": "conflict",
-                "reason": "not_found",
-                "path": rel_path.replace("\\", "/"),
-            }
-        inbound_links = self._inbound_links(rel_path)
-        if inbound_links:
-            return {
-                "status": "conflict",
-                "reason": "inbound_links_exist",
-                "path": rel_path.replace("\\", "/"),
-                "inbound_links": inbound_links,
-            }
-        target.unlink()
-        return {
-            "status": "ok",
-            "path": rel_path.replace("\\", "/"),
-        }
+        canonical_path = target.relative_to(self.settings.wiki_root.resolve()).as_posix()
+        with self._document_mutation_lock:
+            if not target.exists():
+                return {
+                    "status": "conflict",
+                    "reason": "not_found",
+                    "path": canonical_path,
+                }
+            inbound_links = self._inbound_links(canonical_path)
+            if inbound_links:
+                return {
+                    "status": "conflict",
+                    "reason": "inbound_links_exist",
+                    "path": canonical_path,
+                    "inbound_links": inbound_links,
+                }
+            target.unlink()
+        return {"status": "ok", "path": canonical_path}
 
     def rename_doc(
         self,
@@ -2031,33 +2045,35 @@ class KnowledgeIndex:
     ) -> dict[str, Any]:
         source = self._resolve_wiki_markdown_path(source_path)
         destination = self._resolve_wiki_markdown_path(destination_path)
-        if not source.exists():
-            return {
-                "status": "conflict",
-                "reason": "not_found",
-                "source_path": source_path.replace("\\", "/"),
-            }
-        if destination.exists():
-            destination_content = destination.read_text(encoding="utf-8")
-            return {
-                "status": "conflict",
-                "reason": "destination_exists",
-                "source_path": source_path.replace("\\", "/"),
-                "destination_path": destination_path.replace("\\", "/"),
-            }
-        inbound_links = self._inbound_links(source_path)
-        if inbound_links:
-            return {
-                "status": "conflict",
-                "reason": "inbound_links_exist",
-                "source_path": source_path.replace("\\", "/"),
-                "inbound_links": inbound_links,
-            }
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        os.replace(source, destination)
+        canonical_source = source.relative_to(self.settings.wiki_root.resolve()).as_posix()
+        canonical_destination = destination.relative_to(self.settings.wiki_root.resolve()).as_posix()
+        with self._document_mutation_lock:
+            if not source.exists():
+                return {
+                    "status": "conflict",
+                    "reason": "not_found",
+                    "source_path": canonical_source,
+                }
+            if destination.exists():
+                return {
+                    "status": "conflict",
+                    "reason": "destination_exists",
+                    "source_path": canonical_source,
+                    "destination_path": canonical_destination,
+                }
+            inbound_links = self._inbound_links(canonical_source)
+            if inbound_links:
+                return {
+                    "status": "conflict",
+                    "reason": "inbound_links_exist",
+                    "source_path": canonical_source,
+                    "inbound_links": inbound_links,
+                }
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.replace(source, destination)
         return {
             "status": "ok",
-            "source_path": source_path.replace("\\", "/"),
-            "destination_path": destination.relative_to(self.settings.wiki_root.resolve()).as_posix(),
+            "source_path": canonical_source,
+            "destination_path": canonical_destination,
         }
 

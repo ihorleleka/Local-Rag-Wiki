@@ -69,8 +69,11 @@ Do not add a second global MCP client for the same server.
 Wiki recall is context-bounded. Prefix a prompt with `$wiki ` to opt in
 unconditionally, for example `$wiki explain the deployment architecture`.
 Otherwise, the first direct prompt performs one L0 candidate search and injects
-it only when the service returns evidence with `relevance_score >= 0.5`.
-Candidate and injected L0 results use three matches and are capped at 900
+only individually qualifying results: `relevance_score >= 0.5` plus direct lexical
+grounding to the prompt (two shared meaningful terms or one shared identifier).
+The score is a ranking signal, not a calibrated probability; `$wiki` bypasses this
+conservative automatic-abstention policy. Candidate and injected L0 results use
+three matches and are capped at 900
 characters—about 225 tokens by the recorded estimate. It never automatically
 preloads L1 packets; additional detail is a
 model-directed `wiki_search` or `wiki_read` decision. Recall is cached and

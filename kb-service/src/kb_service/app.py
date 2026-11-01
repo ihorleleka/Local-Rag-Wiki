@@ -622,7 +622,7 @@ def create_app():
 
     @mcp.tool()
     async def wiki_write(path: str, content: str):
-        """Atomically create or replace a Markdown note. A targeted reindex is scheduled without delaying this response."""
+        """Atomically create or replace a Markdown note. Re-read immediately before writing and coordinate one writer per note. A targeted reindex is scheduled without delaying this response."""
         result = await asyncio.to_thread(index.write_doc, path, content)
         if result["status"] == "ok":
             index_result = await coordinator.request_reindex(

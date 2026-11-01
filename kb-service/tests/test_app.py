@@ -336,16 +336,13 @@ class AppBehaviorTests(unittest.TestCase):
             {"miss": False, "result_count": 1, "minimum_relevance": 0.35, "depth": "packet"},
         )
 
-    def test_read_tool_returns_content_with_concurrency_hash(self) -> None:
+    def test_read_tool_returns_document_content(self) -> None:
         app = self.app_module.create_app()
         read = DummyMCP.last_instance.tools[1][1]
 
         result = read("owner.md")
 
-        self.assertEqual(
-            result,
-            {"path": "owner.md", "content": "document body"},
-        )
+        self.assertEqual(result, {"path": "owner.md", "content": "document body"})
 
     def test_search_miss_is_empty_diagnostic_not_error(self) -> None:
         app = self.app_module.create_app()

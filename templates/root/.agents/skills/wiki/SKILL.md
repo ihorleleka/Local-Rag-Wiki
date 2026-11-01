@@ -138,14 +138,23 @@ inspection reduced, and claims reproducible across sessions, not note/search
 counts. Separate documentation problems from tool delivery, execution quality,
 and task acceptance problems. Report proposed fixes separately from applied ones.
 
-## Completion
+## Completion and Durable Knowledge Disposition
 
-At completion of substantive work where repository knowledge was relevant,
-consider whether durable findings need write-back; load authoring guidance if
-needed to decide or act. Report once: `wiki updated: <notes>` or
-`no wiki write-back warranted: <reason>`. Do not impose this report on unrelated
-or trivial work. Mention retrieval only when it changed the outcome, constrained
-work, or exposed a durable gap; do not repeat status after routine worker updates.
-Disclose relevant capability and verification limits, including checks not run.
-Never claim indexing, schema validation, or concurrency guarantees not exercised.
-Workers return these details to their lead for consolidated reporting.
+For substantive work where repository knowledge was relevant, load authoring
+guidance and record one concise disposition: **eligible finding** (or none),
+**canonical owner**, **evidence**, **generalization/coverage**, and either the
+managed write receipt (path/result and checks run) or a specific no-write reason.
+A no-write is valid when the owner is already accurate, evidence is inadequate,
+or the finding is task-local. Do not impose this on trivial or unrelated work.
+
+Use the bounded **Maintain/Promote** route at a coherent milestone, a material
+domain/contract change, or an explicitly queued knowledge-backlog item. Maintain
+checks the affected owner; Promote verifies a related pending investigation and
+moves only a supported reusable conclusion into its canonical owner (or retains/
+deletes it). Do not sweep the wiki, set file-count targets, or automatically
+capture raw prompts, chat, logs, or decision briefs.
+
+Mention retrieval only when it changed the outcome, constrained work, or exposed
+a durable gap. Disclose relevant capability and verification limits, including
+checks not run. Never claim indexing, schema validation, or concurrency guarantees
+not exercised. Workers return these details to their lead for consolidated reporting.
