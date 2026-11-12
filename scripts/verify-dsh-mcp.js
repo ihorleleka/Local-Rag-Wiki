@@ -166,7 +166,7 @@ async function assertBoundedExplicitRecall() {
   const first = await recall.retrieveWikiTiers(workspace, 'architecture', new AbortController().signal, search)
   assert.equal(calls.length, 1)
   assert.deepEqual(calls[0], { query: 'architecture', depth: 'abstract', top_k: 3 })
-  assert(first.abstract.length <= 912, 'L0 retrieval must be character-bounded')
+  assert(first.abstract.length <= 900, 'L0 retrieval including truncation marker must fit the character budget')
   const second = await recall.retrieveWikiTiers(workspace, 'architecture', new AbortController().signal, search)
   assert.equal(second.abstract, first.abstract)
   const metrics = recall.recallMetrics(workspace)
@@ -190,13 +190,23 @@ async function assertBoundedExplicitRecall() {
     { explicit: false },
   )
   assert.equal(ungrounded, undefined, 'a high relative rank alone must not inject unrelated wiki context')
+  const trusted = {
+    status: 'active',
+    last_verified: '2026-11-12',
+    schema_health: 'complete',
+    freshness_state: 'current',
+    evidence_state: 'present',
+    verification_required: false,
+  }
   const grounded = await recall.retrieveWikiTiers(
     automaticWorkspace,
     'project architecture boundaries',
     new AbortController().signal,
     async () => JSON.stringify({ results: [
-      { relevance_score: 0.5, abstract: 'project architecture boundaries and module ownership' },
-      { relevance_score: 0.99, abstract: 'unrelated deployment handbook' },
+      { relevance_score: 0.5, abstract: 'project architecture boundaries and module ownership', trust: trusted },
+      { relevance_score: 0.99, abstract: 'unrelated deployment handbook', trust: trusted },
+      { relevance_score: 0.99, abstract: 'project architecture obsolete boundaries', trust: { ...trusted, status: 'superseded' } },
+      { relevance_score: 0.99, abstract: 'project architecture pending boundaries', trust: { ...trusted, status: 'pending' } },
     ] }),
     { explicit: false },
   )
@@ -223,6 +233,65 @@ async function assertBoundedExplicitRecall() {
   assert.equal(automaticMetrics.automaticRequests, 4)
   assert.equal(automaticMetrics.confidenceSkipped, 2)
   assert.equal(automaticMetrics.groundingSkipped, 1)
+
+  // Hold relevance/grounding constant: lifecycle and evidence must gate each
+  // candidate independently, even when a companion has trustworthy metadata.
+  const trustWorkspace = path.join(SCRATCH, 'trust-gated-recall')
+  const untrustedStates = [
+    undefined,
+    {},
+    { ...trusted, status: 'pending' },
+    { ...trusted, status: 'superseded' },
+    { ...trusted, status: 'deprecated' },
+    { ...trusted, status: undefined },
+    { ...trusted, schema_health: 'incomplete' },
+    { ...trusted, freshness_state: 'stale' },
+    { ...trusted, freshness_state: 'unknown' },
+    { ...trusted, evidence_state: 'missing' },
+    { ...trusted, evidence_state: 'changed_since_verification' },
+    { ...trusted, verification_required: true },
+    { ...trusted, verification_required: 'false' },
+    { ...trusted, verification_required: undefined },
+    { ...trusted, needs_verification: true },
+  ]
+  for (const [index, trust] of untrustedStates.entries()) {
+    const query = `project architecture trust-case-${index}`
+    const search = async () => JSON.stringify({ results: [
+      { relevance_score: 0.99, abstract: 'project architecture boundaries', trust },
+    ] })
+    const automatic = await recall.retrieveWikiTiers(trustWorkspace, query, undefined, search, { explicit: false })
+    assert.equal(automatic, undefined, `untrusted case ${index} must abstain automatically`)
+    const explicit = await recall.retrieveWikiTiers(trustWorkspace, query, undefined, search, { explicit: true })
+    assert(explicit?.abstract, `untrusted case ${index} must remain inspectable by explicit request`)
+    const repeated = await recall.retrieveWikiTiers(trustWorkspace, query, undefined, search, { explicit: false })
+    assert.equal(repeated, undefined, 'explicit untrusted context must not populate automatic cache')
+  }
+  assert.equal(recall.recallMetrics(trustWorkspace).trustSkipped, untrustedStates.length * 2)
+
+  const oversized = { relevance_score: 0.99, abstract: `project architecture ${'x'.repeat(2000)}`, trust: trusted }
+  const small = { relevance_score: 0.9, abstract: 'project architecture contract', trust: trusted }
+  const budgetWorkspace = path.join(SCRATCH, 'budget-gated-recall')
+  for (const explicit of [true, false]) {
+    const empty = await recall.retrieveWikiTiers(
+      budgetWorkspace, 'project architecture oversized', undefined,
+      async () => JSON.stringify({ results: [oversized], diagnostics: { miss: false } }), { explicit },
+    )
+    assert.equal(empty, undefined, 'a budget miss must abstain, not inject an empty result envelope')
+    const compact = await recall.retrieveWikiTiers(
+      budgetWorkspace, 'project architecture smaller companion', undefined,
+      async () => JSON.stringify({ results: [oversized, small], diagnostics: { miss: false } }), { explicit },
+    )
+    assert(compact?.abstract.length <= 900)
+    const envelope = JSON.parse(compact.abstract)
+    assert.deepEqual(envelope.results, [small], 'an oversized candidate must not hide a smaller useful result')
+    assert.equal(envelope.diagnostics.result_count, 1)
+    assert.equal(envelope.diagnostics.budget_truncated, true)
+    const overhead = await recall.retrieveWikiTiers(
+      budgetWorkspace, 'project architecture diagnostics overhead', undefined,
+      async () => JSON.stringify({ results: [small], diagnostics: { detail: 'x'.repeat(1000) } }), { explicit },
+    )
+    assert.equal(overhead, undefined, 'diagnostic overhead must also respect the recall budget')
+  }
 }
 
 async function assertLifecycleIntegration() {

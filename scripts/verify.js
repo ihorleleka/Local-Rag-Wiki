@@ -157,11 +157,25 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   const dshMcpClientPath = path.join(targetRoot, ".dsh", ".dsh-mcp-client.js");
   const dshModulePath = path.join(targetRoot, ".dsh", "package.json");
   assert(fs.existsSync(consumerAgentsPath), "consumer AGENTS.md missing");
-  for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
+  const consumerPolicy = fs.readFileSync(consumerAgentsPath, "utf8");
+  assert(
+    consumerPolicy.includes(`${agentsDir}/skills/wiki/SKILL.md`),
+    "AGENTS.md must name the delivered skill for clients without native skill discovery"
+  );
+  for (const relativePath of ["SKILL.md", "references/authoring.md", "agents/openai.yaml"]) {
     const deliveredPath = path.join(path.dirname(wikiSkillPath), relativePath);
     assert(fs.existsSync(deliveredPath), `wiki guidance missing: ${relativePath}`);
     const actual = fs.readFileSync(deliveredPath, "utf8");
     assert(actual.trim(), `wiki guidance is empty: ${relativePath}`);
+    const templatePath = path.join(ROOT, "templates", "root", ".agents", "skills", "wiki", relativePath);
+    const expected = fs.readFileSync(templatePath, "utf8");
+    assert(actual === expected, `delivered wiki guidance differs from its template: ${relativePath}`);
+    if (relativePath === "SKILL.md") {
+      const frontmatter = actual.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+      assert(frontmatter, "wiki skill must include discoverable YAML frontmatter");
+      const metadata = YAML.parse(frontmatter[1]);
+      assert(metadata.name === "wiki" && metadata.description?.trim(), "wiki skill routing metadata is invalid");
+    }
     for (const match of actual.matchAll(/\[[^\]]+\]\(([^)]+\.md)(?:#[^)]*)?\)/g)) {
       assert(
         fs.existsSync(path.resolve(path.dirname(deliveredPath), match[1])),
@@ -646,6 +660,7 @@ function verifyPublishedPackage() {
     manifest.dsh.bundle.patch,
     "templates/root/.agents/skills/wiki/SKILL.md",
     "templates/root/.agents/skills/wiki/references/authoring.md",
+    "templates/root/.agents/skills/wiki/agents/openai.yaml",
     "templates/root/.agents/run-wiki-manager.mcp.js",
   ];
   for (const entry of entries) {

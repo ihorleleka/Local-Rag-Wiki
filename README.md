@@ -69,10 +69,15 @@ Do not add a second global MCP client for the same server.
 Wiki recall is context-bounded. Prefix a prompt with `$wiki ` to opt in
 unconditionally, for example `$wiki explain the deployment architecture`.
 Otherwise, the first direct prompt performs one L0 candidate search and injects
-only individually qualifying results: `relevance_score >= 0.5` plus direct lexical
-grounding to the prompt (two shared meaningful terms or one shared identifier).
-The score is a ranking signal, not a calibrated probability; `$wiki` bypasses this
-conservative automatic-abstention policy. Candidate and injected L0 results use
+only individually qualifying results: `relevance_score >= 0.5`, direct lexical
+grounding to the prompt (two shared meaningful terms or one shared identifier),
+and explicit trust signals: active status, complete schema, current freshness,
+present evidence, and no required verification. Pending, historical, and unknown-
+trust results are excluded from automatic injection. Older service images without
+these trust fields also cause automatic recall to abstain; explicit retrieval
+remains available. These signals describe the indexed snapshot, not proof of live
+behavior. The score is a ranking signal, not a calibrated probability; `$wiki`
+bypasses this automatic-abstention policy for deliberate inspection. Candidate and injected L0 results use
 three matches and are capped at 900
 characters—about 225 tokens by the recorded estimate. It never automatically
 preloads L1 packets; additional detail is a
@@ -140,6 +145,15 @@ bypass `python -m kb_service` also bypass its process-level protection.
 writes. `wiki_search` supports tiered retrieval (`depth=abstract|packet`) plus
   `path_prefix` directory scoping.
 
+## Agentic memory design review
+
+See the [dated comparison and delivery audit](./docs/agentic-memory-review.md)
+against Mem0, Letta, Graphiti, Cognee, and OpenViking, including adopted patterns,
+licensing caveats, and prioritized remaining work. The design keeps governed
+Markdown and bounded retrieval rather than adding a conversation archive or graph
+service. MCP availability and native skill discovery are separate capabilities;
+the delivered policy names the skill file for clients without `$wiki` discovery.
+
 ## Versioning
 
 The installer and kb-service ride the same Git tag (`X.Y.Z` or `vX.Y.Z`).
@@ -147,6 +161,34 @@ Release automation:
 
 - [tag-version-verify.yml](./.github/workflows/tag-version-verify.yml)
 - [docker-release.yml](./.github/workflows/docker-release.yml)
+
+## Development and verification
+
+From a clean checkout, install the locked JavaScript dependencies before running
+installer and scoped DSH bridge regressions:
+
+```bash
+npm ci
+npm test
+```
+
+The dependency-free Python suite fakes native libraries and model providers; it
+requires Python 3.11+ and does not start Docker or download models:
+
+```bash
+python -m unittest discover -s kb-service/tests -p 'test_*.py'
+```
+
+CI runs this suite on Python 3.11 and 3.14. See the
+[service verification notes](./kb-service/README.md#verification) for the separate
+real-dependency integration suite. `npm run verify:runner` requires Docker and
+exercises container lifecycle operations; it is not part of the offline suite.
+
+When updating DSH-related libraries, check the supported runtime's peer ranges,
+not only npm's `latest` tag. DSH 0.2.1-rc.5 requires Cordis `~4.0.5` and uses
+Schemastery `~3.18.5`; upgrading the top-level copies independently can split the
+plugin dependency graph. Preserve the supported runtime baseline and verify the
+scoped bridge before accepting such updates.
 
 ## License
 

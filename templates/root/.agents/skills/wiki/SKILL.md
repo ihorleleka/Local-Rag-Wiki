@@ -67,6 +67,13 @@ Do not load authoring guidance for routine retrieval.
    against source or scoped execution evidence. When present, inspect
    `schema_health`, `freshness_state`, `evidence_state`, `verification_required`,
    `last_verified`, and `gaps`; these signals are not proof of behavior.
+   Treat `status: pending` as a candidate, not an accepted fact, even if its
+   relevance is high or its date is recent. Default search includes pending
+   investigations; `include_inactive: true` additionally exposes deprecated and
+   superseded history. Use history only to explain a change, never silently as
+   the current contract. When sources conflict, read the owners and check scope,
+   version, authority, and current evidence; neither the newest date nor the
+   highest relevance score resolves a contradiction.
 
 ### Query Shape and Starting Budget
 

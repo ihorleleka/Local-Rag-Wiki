@@ -36,6 +36,7 @@ function workspaceMetrics(workspace) {
       automaticSkipped: 0,
       confidenceSkipped: 0,
       groundingSkipped: 0,
+      trustSkipped: 0,
       injectedChars: 0,
       estimatedInjectedTokens: 0,
       budgetTruncations: 0,
@@ -58,7 +59,8 @@ function warn(workspace, reason) {
 
 function truncate(text, limit) {
   const normalized = String(text || '').trim()
-  return normalized.length > limit ? `${normalized.slice(0, limit)}\n[truncated]` : normalized
+  const suffix = '\n[truncated]'
+  return normalized.length > limit ? `${normalized.slice(0, Math.max(0, limit - suffix.length))}${suffix}` : normalized
 }
 
 function isMiss(text) {
@@ -109,12 +111,14 @@ function compactSearchResponse(response, limit) {
   const selected = []
   for (const result of results) {
     const candidate = { results: [...selected, result], diagnostics: { ...diagnostics, result_count: selected.length + 1 } }
-    if (JSON.stringify(candidate).length > limit) break
+    if (JSON.stringify(candidate).length > limit) continue
     selected.push(result)
   }
+  if (selected.length === 0) return undefined
   if (selected.length !== results.length) diagnostics.budget_truncated = true
   const compact = { results: selected, diagnostics: { ...diagnostics, result_count: selected.length } }
-  return JSON.stringify(compact)
+  const serialized = JSON.stringify(compact)
+  return serialized.length <= limit ? serialized : undefined
 }
 
 function automaticCandidates(query, response) {
@@ -123,6 +127,19 @@ function automaticCandidates(query, response) {
     Number(result?.relevance_score) >= AUTO_RECALL_MINIMUM_SCORE
     && hasLexicalGrounding(query, result)
   ))
+}
+
+// Relevance is not authority. Missing trust metadata (including older service
+// responses and raw chunks) must not silently become verified project memory.
+// Explicit `$wiki` and model-directed tools remain available for inspection.
+function isTrustedAutomaticCandidate(result) {
+  const trust = result?.trust
+  return trust?.status === 'active'
+    && trust.schema_health === 'complete'
+    && trust.freshness_state === 'current'
+    && trust.evidence_state === 'present'
+    && trust.verification_required === false
+    && trust.needs_verification !== true
 }
 
 function cacheKey(workspace, query, explicit) {
@@ -213,10 +230,15 @@ async function runNativeRecall(workspace, query, search, { explicit = false } = 
         workspaceMetrics(workspace).groundingSkipped += 1
         return undefined
       }
-      response.results = grounded
+      const trusted = grounded.filter(isTrustedAutomaticCandidate)
+      if (trusted.length === 0) {
+        workspaceMetrics(workspace).trustSkipped += 1
+        return undefined
+      }
+      response.results = trusted
     }
     const abstract = compactSearchResponse(response, ABSTRACT_LIMIT)
-    if (abstract.length > ABSTRACT_LIMIT || !Array.isArray(response.results) || response.results.length === 0) {
+    if (!abstract) {
       workspaceMetrics(workspace).budgetTruncations += 1
       return undefined
     }

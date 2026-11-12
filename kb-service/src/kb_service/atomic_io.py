@@ -20,10 +20,12 @@ def atomic_write_text(target: Path, content: str) -> None:
             suffix=".tmp",
             delete=False,
         ) as temporary:
+            # Track the staging file before any operation that can fail, so
+            # encoding, write, flush, fsync, and close errors all reach cleanup.
+            temporary_path = Path(temporary.name)
             temporary.write(content)
             temporary.flush()
             os.fsync(temporary.fileno())
-            temporary_path = Path(temporary.name)
         # Concurrent atomic replacements can briefly collide on Windows while
         # the previous handle closes. Retry the filesystem primitive, never a
         # higher-level lock or request queue.

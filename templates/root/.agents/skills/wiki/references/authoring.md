@@ -98,6 +98,33 @@ covered and what it did not. Keep findings as observed facts; promote them to `r
 mid-task stash; treat those as unverified candidates and, on a later Maintain/Audit pass, verify
 their evidence and either activate/promote them or delete them.
 
+### Lifecycle, Contradictions, and Sensitive Content
+
+Use existing statuses rather than introducing unsupported frontmatter:
+
+- `pending`: a candidate with a bounded question, evidence, applicability, and a
+  verification path; not current policy or an approved conclusion.
+- `active`: the canonical owner after the stated scope has been verified.
+- `superseded`: retained history replaced by a named canonical owner. In prose,
+  link the replacement and state the version/date or condition of the change.
+- `deprecated`: no longer applicable; explain why and link an alternative if one exists.
+
+Before capture or promotion, search for the existing owner and merge duplicate
+findings without losing their evidence or scope. Promotion is not just changing
+`status`: verify the conclusion, reconcile conflicting owners and inbound links,
+then set `last_verified` for the scope actually checked. Do not resolve a conflict
+by newest timestamp, retrieval rank, or silently deleting inconvenient evidence.
+If authority or applicability remains unclear, keep the candidate pending and
+record the unresolved question. History is not an additional current owner.
+
+Distill only the minimum reusable finding. Never retain credentials, tokens,
+private personal data, raw prompts/transcripts, or sensitive logs in wiki notes,
+including `wiki_capture`. Use redacted examples and repository evidence instead;
+a secret scanner or redaction service is not provided by these tools. If such
+content is already stored, stop copying it and report it for authorized removal
+and credential rotation; deleting a note does not erase Git history, index copies,
+backups, or previous tool responses.
+
 Do not flatten mandatory rules into references or mix several kinds to avoid
 choosing ownership. Use repository-relative files/directories, public symbols,
 focused tests, refactors, tickets, or user confirmations as bounded evidence.

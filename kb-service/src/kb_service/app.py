@@ -529,7 +529,7 @@ def create_app():
         depth: str = "packet",
         path_prefix: str | None = None,
     ) -> dict[str, Any]:
-        """Search active wiki notes. depth='abstract' returns cheap L0 one-liners for scanning; depth='packet' (default) returns L1 context packets; use wiki_read for the full L2 note. Set path_prefix to scope retrieval to a directory subtree; include_inactive for deprecated/superseded history."""
+        """Search wiki notes, including pending investigations (not verified knowledge). depth='abstract' returns cheap L0 one-liners with lifecycle/trust signals; depth='packet' (default) returns L1 context packets; use wiki_read for the full L2 note. Set path_prefix to scope retrieval to a directory subtree; include_inactive for deprecated/superseded history."""
         requested_depth = str(depth or "packet").strip().lower()
         if requested_depth not in SEARCH_DEPTHS:
             requested_depth = "packet"
@@ -552,12 +552,15 @@ def create_app():
                         "relevance_score": r.score,
                         "abstract": _packet_abstract(canonical_packet),
                         "trust": {
+                            "status": canonical_packet.get("status"),
+                            "last_verified": canonical_packet.get("last_verified"),
                             "schema_health": canonical_packet.get("schema_health"),
                             "freshness_state": canonical_packet.get("freshness_state"),
                             "evidence_state": canonical_packet.get("evidence_state"),
-                            "verification_required": canonical_packet.get(
-                                "verification_required",
-                                canonical_packet.get("needs_verification", False),
+                            "verification_required": (
+                                canonical_packet.get("status") != "active"
+                                or bool(canonical_packet.get("needs_verification", False))
+                                or canonical_packet.get("verification_required") is not False
                             ),
                         },
                     }

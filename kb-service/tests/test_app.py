@@ -436,6 +436,8 @@ class AppBehaviorTests(unittest.TestCase):
                     "kind": "reference",
                     "source": "components/page.md",
                     "rule": "Own the page contract.",
+                    "status": "active",
+                    "last_verified": "2026-11-12",
                     "schema_health": "complete",
                     "freshness_state": "current",
                     "evidence_state": "present",
@@ -454,7 +456,63 @@ class AppBehaviorTests(unittest.TestCase):
         self.assertEqual(item["source"], "components/page.md")
         self.assertEqual(item["abstract"], "Own the page contract.")
         self.assertNotIn("packet", item)
-        self.assertEqual(item["trust"]["schema_health"], "complete")
+        self.assertEqual(item["trust"], {
+            "status": "active",
+            "last_verified": "2026-11-12",
+            "schema_health": "complete",
+            "freshness_state": "current",
+            "evidence_state": "present",
+            "verification_required": False,
+        })
+
+    def test_abstract_trust_does_not_promote_pending_or_unknown_notes(self) -> None:
+        self.app_module.create_app()
+        search = DummyMCP.last_instance.tools[0][1]
+        for status in ["pending", "deprecated", "superseded", None]:
+            with self.subTest(status=status):
+                DummyKnowledgeIndex.last_instance.search_results = [
+                    types.SimpleNamespace(
+                        source_file="investigations/candidate.md",
+                        chunk_id="packet",
+                        score=0.99,
+                        context="candidate finding",
+                        record_type="packet",
+                        context_packet={
+                            "status": status,
+                            "summary": "Candidate finding, not active verified knowledge.",
+                            "schema_health": "complete",
+                            "freshness_state": "current",
+                            "evidence_state": "present",
+                            "verification_required": False,
+                        },
+                    )
+                ]
+                result = search("candidate finding", depth="abstract")
+                trust = result["results"][0]["trust"]
+                self.assertEqual(trust["status"], status)
+                self.assertTrue(trust["verification_required"])
+                self.assertIsNone(trust["last_verified"])
+
+    def test_abstract_trust_missing_or_conflicting_verification_requires_check(self) -> None:
+        self.app_module.create_app()
+        search = DummyMCP.last_instance.tools[0][1]
+        for flags in [
+            {},
+            {"verification_required": None},
+            {"verification_required": "false"},
+            {"verification_required": 0},
+            {"verification_required": False, "needs_verification": True},
+        ]:
+            with self.subTest(flags=flags):
+                DummyKnowledgeIndex.last_instance.search_results = [
+                    types.SimpleNamespace(
+                        source_file="owner.md", chunk_id="packet", score=0.9,
+                        context="owner", record_type="packet",
+                        context_packet={"status": "active", "summary": "Owner contract", **flags},
+                    )
+                ]
+                trust = search("owner", depth="abstract")["results"][0]["trust"]
+                self.assertTrue(trust["verification_required"])
 
     def test_search_forwards_path_prefix_scope(self) -> None:
         app = self.app_module.create_app()

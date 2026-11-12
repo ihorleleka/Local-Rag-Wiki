@@ -10,6 +10,7 @@ import hashlib
 import tempfile
 import time
 import unittest
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -70,6 +71,19 @@ applies_to: [{note_id}]
 """
 
 
+@contextmanager
+def managed_index(settings):
+    from kb_service.indexer import KnowledgeIndex
+
+    index = KnowledgeIndex(settings)
+    try:
+        yield index
+    finally:
+        # Release native mmap/SQLite handles before TemporaryDirectory cleanup,
+        # which cannot remove open Chroma files on Windows.
+        index.client.close()
+
+
 class RealChromaIntegrationTests(unittest.TestCase):
     @staticmethod
     def settings(root: Path, wiki: Path) -> SimpleNamespace:
@@ -91,8 +105,6 @@ class RealChromaIntegrationTests(unittest.TestCase):
         )
 
     def test_index_search_mutation_filtering_and_conflicts(self) -> None:
-        from kb_service.indexer import KnowledgeIndex
-
         with tempfile.TemporaryDirectory(prefix="kb-real-integration-") as temp:
             root = Path(temp)
             wiki = root / "wiki"
@@ -106,8 +118,10 @@ class RealChromaIntegrationTests(unittest.TestCase):
             )
             settings = self.settings(root, wiki)
 
-            with patch("kb_service.indexer.OnnxMiniLmProvider", DeterministicProvider):
-                index = KnowledgeIndex(settings)
+            with (
+                patch("kb_service.indexer.OnnxMiniLmProvider", DeterministicProvider),
+                managed_index(settings) as index,
+            ):
                 first = index.reindex()
                 self.assertEqual(first["changed"], 2)
                 unchanged_started = time.perf_counter()
@@ -140,6 +154,7 @@ class RealChromaIntegrationTests(unittest.TestCase):
     def test_real_fastapi_lifespan_health_and_fastmcp_mount(self) -> None:
         from fastapi.testclient import TestClient
         from kb_service.app import create_app
+        from kb_service.contract import INDEX_SCHEMA_VERSION, MCP_TOOL_CONTRACT_VERSION
         from kb_service.settings import Settings
 
         with tempfile.TemporaryDirectory(prefix="kb-real-app-") as temp:
@@ -152,15 +167,21 @@ class RealChromaIntegrationTests(unittest.TestCase):
             settings = self.settings(root, wiki)
             with (
                 patch("kb_service.indexer.OnnxMiniLmProvider", DeterministicProvider),
+                managed_index(settings) as index,
+                patch("kb_service.app.KnowledgeIndex", return_value=index),
                 patch.object(Settings, "load", return_value=settings),
                 TestClient(create_app()) as client,
             ):
+                deadline = time.monotonic() + 10
                 health = client.get("/health")
-                self.assertEqual(health.status_code, 200)
-                self.assertEqual(health.json()["status"], "ok")
+                while health.json()["status"] == "starting" and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                    health = client.get("/health")
+                self.assertEqual(health.status_code, 200, health.text)
+                self.assertEqual(health.json()["status"], "ok", health.text)
                 version = client.get("/version").json()
-                self.assertEqual(version["index_schema_version"], 7)
-                self.assertEqual(version["mcp_tool_contract_version"], 6)
+                self.assertEqual(version["index_schema_version"], INDEX_SCHEMA_VERSION)
+                self.assertEqual(version["mcp_tool_contract_version"], MCP_TOOL_CONTRACT_VERSION)
                 self.assertTrue(any(route.path.startswith("/mcp") for route in client.app.routes))
 
 
