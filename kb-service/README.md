@@ -13,7 +13,7 @@ It indexes repository wiki notes and serves retrieval and safe write tools.
 ## MCP tools
 
 - read/retrieval: `wiki_search`, `wiki_read`, `wiki_list`, `wiki_tree`, `wiki_schema_report`
-- write/maintenance: `wiki_write`, `wiki_capture`, `wiki_delete`, `wiki_rename`
+- write/maintenance: `wiki_edit`, `wiki_write`, `wiki_capture`, `wiki_delete`, `wiki_rename`
 
 `wiki_search` supports tiered retrieval: `depth="abstract"` returns cheap L0 one-liners for scanning, `depth="packet"` (default) returns L1 context packets, and `wiki_read` returns the full L2 note. Pass `path_prefix` to scope retrieval to a directory subtree. `wiki_tree` browses the wiki as a navigable tree (ls/tree style) with per-note kind, status, and freshness.
 
@@ -31,11 +31,25 @@ Typed note kinds: `rule`, `decision`, `reference`, `runbook`, `glossary`, and `i
 
 - Markdown notes are the source of truth.
 - `wiki_read` returns the current complete Markdown content.
-- Writes replace whole notes atomically; delete and rename operate by path.
+- Prefer `wiki_edit(path: str, old_text: str, new_text: str)` for small updates to
+  existing notes. It replaces exactly one literal occurrence of `old_text`, with
+  no regex, fuzzy matching, or replace-all behavior. `old_text` must be nonempty;
+  empty `new_text` deletes the matched text.
+- Edit conflicts are `not_found` (note does not exist), `text_not_found` (no exact
+  match), and `ambiguous_match` (more than one exact match). Conflicts make no
+  writes and schedule no reindex. Re-read the note and choose a unique literal
+  context before retrying; do not fall back to a full replacement to bypass a
+  conflict.
+- Use `wiki_write` for note creation or intentional full replacements; delete
+  and rename operate by path.
+- Successful edits use the same atomic whole-note persistence as writes.
   If UTF-8 encoding or staging I/O fails, the previous note/manifest is retained
   and the temporary staging file is removed.
-- Concurrent updates are eventually consistent, with the last completed replacement winning.
-- Write, delete, rename, and capture calls schedule a targeted reindex and return immediately with `index_status: "scheduled"`; use a later read/search after indexing completes.
+- Concurrent updates are eventually consistent, with the last completed replacement winning;
+  exact matching is not a whole-note optimistic concurrency guarantee.
+- Successful edit, write, delete, rename, and capture calls schedule a targeted
+  reindex and return immediately with `index_status: "scheduled"`; use a later
+  read/search after indexing completes.
 
 ## Runtime defaults
 

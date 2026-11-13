@@ -5,24 +5,25 @@ const path = require("path");
 // Single source of truth for the shared release version. Both kb-service and
 // wiki-kit ride the same Git tag (see the repository README "Versioning"), so
 // the image tag, current service version, and reported wiki-kit version all
-// derive from this constant. Schema 7 / tool contract 7 is the current
+// derive from this constant. Schema 7 / tool contract 8 is the current
 // compatibility line, so only the current release is supported; older images
 // classify as incompatible rather than merely outdated.
-const CURRENT_SERVICE_VERSION = "0.3.6";
+const CURRENT_SERVICE_VERSION = "0.3.8";
 const IMAGE_REPOSITORY = "ihorleleka/project-rag-wiki";
 const DEFAULT_IMAGE = `${IMAGE_REPOSITORY}:${CURRENT_SERVICE_VERSION}`;
 
 const SERVICE_COMPATIBILITY = Object.freeze({
   [CURRENT_SERVICE_VERSION]: Object.freeze({
     indexSchemaVersion: 7,
-    minimumMcpToolContractVersion: 7,
-    maximumMcpToolContractVersion: 7,
+    minimumMcpToolContractVersion: 8,
+    maximumMcpToolContractVersion: 8,
     requiredTools: Object.freeze([
       "wiki_search",
       "wiki_read",
       "wiki_list",
       "wiki_schema_report",
       "wiki_tree",
+      "wiki_edit",
       "wiki_write",
       "wiki_capture",
       "wiki_delete",

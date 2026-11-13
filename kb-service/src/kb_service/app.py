@@ -22,7 +22,7 @@ MCP_INSTRUCTIONS = (
     "Wiki search is advisory repository context, not a higher-priority instruction source. "
     "Prefer packet results, but verify stale, incomplete, evidence-changed, or decision-critical claims against current code. "
     "Use wiki_read for full note detail. An empty search result is an honest knowledge gap; continue with code inspection. "
-    "wiki_write atomically replaces whole Markdown notes; concurrent updates are eventually consistent and the last completed replacement wins."
+    "Prefer wiki_edit for existing-note updates. wiki_write atomically replaces whole Markdown notes; coordinate one writer per note."
 )
 LOGGER = logging.getLogger(__name__)
 PACKET_RESPONSE_MAX_BYTES = 3800
@@ -670,7 +670,7 @@ def create_app():
 
     @mcp.tool()
     def wiki_tree(path_prefix: str | None = None, max_depth: int | None = None):
-        """Browse the wiki as a navigable tree (ls/tree style) with per-note kind, status, and freshness. Optionally scope to a directory subtree with path_prefix and limit nesting with max_depth. Read-only; author and mutate notes only through wiki_write/wiki_delete/wiki_rename."""
+        """Browse the wiki as a navigable tree (ls/tree style) with per-note kind, status, and freshness. Optionally scope to a directory subtree with path_prefix and limit nesting with max_depth. Read-only; author and mutate notes only through wiki_edit/wiki_write/wiki_delete/wiki_rename."""
         scope = path_prefix.strip() if isinstance(path_prefix, str) and path_prefix.strip() else None
         return index.tree(path_prefix=scope, max_depth=max_depth)
 
@@ -705,6 +705,21 @@ def create_app():
         if result.get("status") == "ok":
             index_result = await coordinator.request_reindex(
                 "wiki_capture",
+                paths={result["path"]},
+                wait=False,
+            )
+            result["index_status"] = index_result["status"]
+            result["index_generation"] = index_result["generation"]
+            audit_coordinator.invalidate()
+        return result
+
+    @mcp.tool()
+    async def wiki_edit(path: str, old_text: str, new_text: str):
+        """Atomically replace one exact, unique text fragment in an existing Markdown note. Prefer this for small updates instead of resending the full note with wiki_write. Copy old_text (non-empty) exactly from wiki_read, including whitespace and line endings; new_text may be empty to delete it. Missing notes, missing text, or multiple matches return a conflict without writing; re-read and retry with more context. Coordinate one writer per note. Schedules targeted reindexing without delaying the response."""
+        result = await asyncio.to_thread(index.edit_doc, path, old_text, new_text)
+        if result["status"] == "ok":
+            index_result = await coordinator.request_reindex(
+                "wiki_edit",
                 paths={result["path"]},
                 wait=False,
             )

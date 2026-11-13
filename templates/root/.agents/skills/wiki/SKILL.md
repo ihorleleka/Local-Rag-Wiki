@@ -27,10 +27,13 @@ Choose the mode for the operation:
 | Local-file | Required tools are absent or the service is unavailable | Direct source inspection and local checks; no managed indexing or atomic write guarantee |
 
 The managed tools are `wiki_search`, `wiki_read`, `wiki_list`, `wiki_tree`,
-`wiki_schema_report`, `wiki_write`, `wiki_capture`, `wiki_delete`, and `wiki_rename`.
-Use available native operations; a missing write tool need not prevent native
-reads. In local-file mode, use scoped file search/read and normal repository
-tools. Before any write, follow the authoring reference's mode-specific safeguards.
+`wiki_schema_report`, `wiki_edit`, `wiki_write`, `wiki_capture`, `wiki_delete`, and
+`wiki_rename`. Default to `wiki_edit` when updating an existing note: send only
+changed fragments, not unchanged document content. Reserve `wiki_write` for new
+notes or intentional whole-note rewrites. Use available native operations; a missing write tool
+need not prevent native reads. In local-file mode, use scoped file search/read
+and normal repository tools. Before any write, follow the authoring reference's
+mode-specific safeguards.
 
 If managed tools become available later, validate affected notes and confirm a
 read/search reflects the latest content before trusting indexed results. Do not

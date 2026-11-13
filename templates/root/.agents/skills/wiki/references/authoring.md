@@ -251,12 +251,34 @@ durable knowledge rather than source-by-source narration:
 ## Write Safely and Validate
 
 Use the capability mode established by the skill. In managed mode, read the
-current note immediately before an update and coordinate one writer per owner;
-then use the native write/delete/rename operation. Atomic replacement does not
-provide optimistic concurrency, so re-read and merge if another writer changes
-the note before completion. Permission denials and validation errors do not
-justify bypassing managed writes with direct edits. After an ambiguous failure,
-check whether the write applied before retrying.
+current note immediately before an update and coordinate one writer per owner.
+Default to `wiki_edit(path: str, old_text: str, new_text: str)` for existing-note
+updates, including frontmatter, verification dates, and individual sections.
+Send only the changed fragment with enough unchanged context to match uniquely;
+do not resend the whole note for a localized change. Reserve `wiki_write` for
+new notes or intentional whole-note rewrites, and use native
+`wiki_delete`/`wiki_rename` for path operations.
+
+For several changes in one note, apply edits sequentially against the latest
+content (or replace one coherent section when that is smaller). Preserve
+unrelated text and update any affected evidence/verification metadata. Do not
+parallelize edits to the same note.
+
+For `wiki_edit`, copy a nonempty `old_text` from the current note that occurs
+exactly once. Matching is literal, not regex or fuzzy, and never replaces all
+occurrences. Empty `new_text` deletes the matched text. Conflicts are `not_found`
+(missing note), `text_not_found` (no exact match), and `ambiguous_match` (multiple
+matches); they perform no writes or reindexing. Re-read and reconcile the note,
+then select unique context before retrying. Do not bypass a conflict by blindly
+replacing the whole note.
+
+Successful edits retain atomic whole-note persistence and schedule targeted
+reindexing (`index_status: "scheduled"`), just like writes. Atomic replacement
+and exact matching do not provide whole-note optimistic concurrency, so re-read
+and merge if another writer changes the note before completion. Permission
+denials and validation errors do not justify bypassing managed writes with
+direct edits. After an ambiguous failure, check whether the write applied before
+retrying; a reported `ambiguous_match` conflict itself makes no write.
 
 In local-file mode, coordinate one writer per note, re-read immediately before
 editing, and merge intervening changes. Before deleting/renaming, inspect and

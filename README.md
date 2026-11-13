@@ -140,10 +140,18 @@ bypass `python -m kb_service` also bypass its process-level protection.
   runner and MCP configuration in a consumer repository.
 - [kb-service/](./kb-service) is the Dockerized MCP knowledge service the runner
   launches per repository. It serves `wiki_search`, `wiki_read`, `wiki_list`,
-  `wiki_tree`, `wiki_schema_report`, `wiki_write`, `wiki_capture`, `wiki_delete`,
-  and `wiki_rename` over `POST /mcp/` (loopback by default), with atomic whole-note
-writes. `wiki_search` supports tiered retrieval (`depth=abstract|packet`) plus
-  `path_prefix` directory scoping.
+  `wiki_tree`, `wiki_schema_report`, `wiki_edit`, `wiki_write`, `wiki_capture`,
+  `wiki_delete`, and `wiki_rename` over `POST /mcp/` (loopback by default), with
+  atomic note persistence and targeted reindexing. Prefer `wiki_edit` for small
+  updates; use `wiki_write` for creation or full replacements. `wiki_search`
+  supports tiered retrieval (`depth=abstract|packet`) plus `path_prefix` directory
+  scoping.
+
+`wiki_edit(path: str, old_text: str, new_text: str)` replaces exactly one literal
+match in an existing note. `old_text` must be nonempty; empty `new_text` deletes
+that match. It performs no write on conflicts: `not_found` (missing note),
+`text_not_found` (no match), or `ambiguous_match` (multiple matches). See the
+[service write contract](./kb-service/README.md#data-and-write-model) for details.
 
 ## Agentic memory design review
 

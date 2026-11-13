@@ -1983,7 +1983,8 @@ class KnowledgeIndex:
 
     def read_doc(self, rel_path: str) -> dict[str, str]:
         target = self._resolve_wiki_markdown_path(rel_path)
-        content = target.read_text(encoding="utf-8")
+        with target.open("r", encoding="utf-8", newline="") as document:
+            content = document.read()
         return {
             "path": target.relative_to(self.settings.wiki_root.resolve()).as_posix(),
             "content": content,
@@ -1994,6 +1995,29 @@ class KnowledgeIndex:
         canonical_path = target.relative_to(self.settings.wiki_root.resolve()).as_posix()
         with self._document_mutation_lock:
             atomic_write_text(target, content)
+        return {"status": "ok", "path": canonical_path}
+
+    def edit_doc(self, rel_path: str, old_text: str, new_text: str) -> dict[str, Any]:
+        """Replace one literal, unique fragment under the document mutation lock."""
+        target = self._resolve_wiki_markdown_path(rel_path)
+        if not isinstance(old_text, str) or not old_text:
+            raise ValueError("old_text must be a non-empty string")
+        if not isinstance(new_text, str):
+            raise ValueError("new_text must be a string (empty deletes the fragment)")
+        canonical_path = target.relative_to(self.settings.wiki_root.resolve()).as_posix()
+        with self._document_mutation_lock:
+            if not target.exists():
+                return {"status": "conflict", "reason": "not_found", "path": canonical_path}
+            with target.open("r", encoding="utf-8", newline="") as document:
+                content = document.read()
+            start = content.find(old_text)
+            if start < 0:
+                return {"status": "conflict", "reason": "text_not_found", "path": canonical_path}
+            # Include overlapping occurrences: 'aa' is ambiguous in 'aaa'.
+            if content.find(old_text, start + 1) >= 0:
+                return {"status": "conflict", "reason": "ambiguous_match", "path": canonical_path}
+            updated = content[:start] + new_text + content[start + len(old_text):]
+            atomic_write_text(target, updated)
         return {"status": "ok", "path": canonical_path}
 
     @staticmethod

@@ -216,6 +216,7 @@ class AppBehaviorTests(unittest.TestCase):
                 "wiki_rename",
                 "wiki_tree",
                 "wiki_capture",
+                "wiki_edit",
             ],
         )
         self.assertEqual(
@@ -372,7 +373,7 @@ class AppBehaviorTests(unittest.TestCase):
         result = asyncio.run(read_version())
         self.assertEqual(result["service"], "kb-service")
         self.assertEqual(result["index_schema_version"], 7)
-        self.assertEqual(result["mcp_tool_contract_version"], 7)
+        self.assertEqual(result["mcp_tool_contract_version"], 8)
         self.assertIsInstance(result["service_version"], str)
 
     def test_packet_search_fixtures_are_canonical_compact_and_bounded(self) -> None:
@@ -634,6 +635,34 @@ class AppBehaviorTests(unittest.TestCase):
                 self.assertFalse(refreshed["audit"]["stale"])
 
         asyncio.run(run_schema_report())
+
+    def test_edit_tool_reindexes_only_on_success(self) -> None:
+        app = self.app_module.create_app()
+        edit = dict(DummyMCP.last_instance.tools)["wiki_edit"]
+
+        async def run_checks():
+            async with app.lifespan(app):
+                calls = []
+                def edit_doc(*args):
+                    calls.append(args)
+                    return {"status": "ok", "path": "owner.md"}
+                index = DummyKnowledgeIndex.last_instance
+                index.edit_doc = edit_doc
+                result = await edit("owner.md", "old", "new")
+                self.assertEqual(calls, [("owner.md", "old", "new")])
+                self.assertEqual(result["index_status"], "scheduled")
+                self.assertIsInstance(result["index_generation"], int)
+                await asyncio.sleep(0.05)
+                count = index.reindex_calls
+                for reason in ("not_found", "text_not_found", "ambiguous_match"):
+                    index.edit_doc = lambda *args: {"status": "conflict", "reason": reason}
+                    conflict = await edit("owner.md", "old", "new")
+                    self.assertEqual(conflict["reason"], reason)
+                    self.assertNotIn("index_status", conflict)
+                await asyncio.sleep(0.05)
+                self.assertEqual(index.reindex_calls, count)
+
+        asyncio.run(run_checks())
 
     def test_write_tool_reindexes_only_on_success(self) -> None:
         app = self.app_module.create_app()

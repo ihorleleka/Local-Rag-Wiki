@@ -1112,6 +1112,58 @@ class WikiPathSafetyTests(unittest.TestCase):
             self.assertEqual(read["content"], "# Safe\n")
             self.assertEqual((wiki_root / "components" / "test.md").read_text(encoding="utf-8"), "# Safe\n")
 
+    def test_edit_preserves_surrounding_bytes_and_supports_deletion(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            index, wiki_root = self.make_index(Path(tmpdir))
+            original = "---\r\ntitle: Café\r\n---\r\n# Heading\r\nold body\r\nend"
+            index.write_doc("owner.md", original)
+            self.assertEqual(index.read_doc("owner.md")["content"], original)
+            result = index.edit_doc("owner.md", "old body", "new body\r\nextra")
+            self.assertEqual(result, {"status": "ok", "path": "owner.md"})
+            expected = original.replace("old body", "new body\r\nextra")
+            self.assertEqual((wiki_root / "owner.md").read_bytes(), expected.encode("utf-8"))
+            index.edit_doc("owner.md", "new body\r\nextra", "")
+            self.assertEqual(index.read_doc("owner.md")["content"], original.replace("old body", ""))
+
+    def test_edit_conflicts_and_invalid_arguments_do_not_write(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            index, wiki_root = self.make_index(Path(tmpdir))
+            index.write_doc("owner.md", "aaa repeated repeated")
+            for old, reason in (("missing", "text_not_found"), ("repeated", "ambiguous_match"), ("aa", "ambiguous_match")):
+                result = index.edit_doc("owner.md", old, "replacement")
+                self.assertEqual(result["reason"], reason)
+            for old, new in (("", "x"), (None, "x"), ("aaa", None)):
+                with self.assertRaises(ValueError):
+                    index.edit_doc("owner.md", old, new)
+            self.assertEqual(index.read_doc("owner.md")["content"], "aaa repeated repeated")
+            self.assertEqual(index.edit_doc("absent.md", "x", "y")["reason"], "not_found")
+            self.assertFalse((wiki_root / "absent.md").exists())
+            with self.assertRaises(ValueError):
+                index.edit_doc("../outside.md", "x", "y")
+
+    def test_concurrent_edits_cannot_both_replace_stale_text(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            index, _ = self.make_index(Path(tmpdir))
+            index.write_doc("owner.md", "original")
+            barrier = Barrier(2)
+            def edit(replacement):
+                barrier.wait()
+                return index.edit_doc("owner.md", "original", replacement)
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(edit, ["first", "second"]))
+            self.assertEqual(sorted(result["status"] for result in results), ["conflict", "ok"])
+            self.assertIn(index.read_doc("owner.md")["content"], {"first", "second"})
+
+    def test_interrupted_edit_leaves_original_and_no_temporary_file(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            index, wiki_root = self.make_index(Path(tmpdir))
+            index.write_doc("owner.md", "original")
+            with patch("kb_service.atomic_io.os.replace", side_effect=OSError("interrupted")):
+                with self.assertRaises(OSError):
+                    index.edit_doc("owner.md", "original", "replacement")
+            self.assertEqual(index.read_doc("owner.md")["content"], "original")
+            self.assertEqual(list(wiki_root.glob(".owner.md.*.tmp")), [])
+
     def test_concurrent_uncoordinated_writers_remain_atomic(self) -> None:
         with TemporaryDirectory() as tmpdir:
             index, _ = self.make_index(Path(tmpdir))
