@@ -584,7 +584,7 @@ function parseSseMessages(body) {
   return messages.filter((m) => m && m !== "[DONE]");
 }
 
-function postMcpJson(mcpUrl, jsonText, sessionId) {
+function postMcpJson(mcpUrl, jsonText, sessionId, { timeoutMs = 30000, protocolVersion } = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(mcpUrl);
     const headers = {
@@ -593,6 +593,16 @@ function postMcpJson(mcpUrl, jsonText, sessionId) {
       "Content-Length": Buffer.byteLength(jsonText, "utf8"),
     };
     if (sessionId) headers["mcp-session-id"] = sessionId;
+    if (protocolVersion) headers["MCP-Protocol-Version"] = protocolVersion;
+    let settled = false;
+    let deadline;
+    function finish(error, response) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (error) reject(error);
+      else resolve(response);
+    }
 
     const req = http.request(
       {
@@ -605,9 +615,11 @@ function postMcpJson(mcpUrl, jsonText, sessionId) {
       (res) => {
         const chunks = [];
         res.on("data", (chunk) => chunks.push(chunk));
+        res.on("error", (error) => finish(error));
+        res.on("aborted", () => finish(new Error("MCP HTTP response aborted")));
         res.on("end", () => {
           const body = Buffer.concat(chunks).toString("utf8");
-          resolve({
+          finish(null, {
             statusCode: res.statusCode ?? 0,
             headers: res.headers,
             body,
@@ -616,13 +628,126 @@ function postMcpJson(mcpUrl, jsonText, sessionId) {
       }
     );
 
-    req.on("error", reject);
-    req.setTimeout(30000, () => {
-      req.destroy(new Error("MCP HTTP request timeout"));
-    });
+    req.on("error", (error) => finish(error));
+    // A socket inactivity timeout resets on SSE keepalives. Use a wall-clock
+    // deadline so one unfinished response cannot wedge the entire stdio queue.
+    deadline = setTimeout(() => {
+      const error = new Error("MCP HTTP request timeout");
+      finish(error);
+      req.destroy(error);
+    }, timeoutMs);
     req.write(jsonText, "utf8");
     req.end();
   });
+}
+
+// Stateful HTTP sessions can expire independently of the stdio client. Keep
+// renewal private to the bridge; never replay a possibly executed mutation after
+// a network error or timeout. Only HTTP 404 guarantees session rejection.
+function createMcpMessageHandler(mcpUrl, writeJson, options = {}) {
+  let sessionId = null;
+  let protocolVersion;
+  let initializeRequest;
+  let needsSessionRenewal = false;
+
+  function messages(response) {
+    const contentType = String(response.headers["content-type"] || "");
+    const bodies = contentType.includes("text/event-stream")
+      ? parseSseMessages(response.body)
+      : response.body.trim() ? [response.body] : [];
+    return bodies.map(body => JSON.parse(body));
+  }
+
+  async function send(request, session = sessionId) {
+    return postMcpJson(mcpUrl, JSON.stringify(request), session, { ...options, protocolVersion });
+  }
+
+  function checkResponse(response, request) {
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw new Error(`MCP HTTP ${response.statusCode}`);
+    }
+    const parsed = messages(response);
+    if (Object.hasOwn(request, "id")) {
+      const reply = parsed.find(message => message.id === request.id &&
+        (Object.hasOwn(message, "result") || Object.hasOwn(message, "error")));
+      if (!reply) throw new Error("MCP HTTP response did not contain the matching request ID");
+      return { parsed, reply };
+    }
+    return { parsed };
+  }
+
+  function rememberSession(response, reply) {
+    const nextSession = response.headers["mcp-session-id"];
+    sessionId = typeof nextSession === "string" && nextSession ? nextSession : null;
+    protocolVersion = reply.result?.protocolVersion;
+  }
+
+  async function renewSession() {
+    sessionId = null;
+    if (!initializeRequest) throw new Error("MCP session expired before successful initialization");
+    const response = await send(initializeRequest, null);
+    const { reply } = checkResponse(response, initializeRequest);
+    if (reply.error) throw new Error("MCP session reinitialization failed");
+    rememberSession(response, reply);
+    checkResponse(await send({ jsonrpc: "2.0", method: "notifications/initialized" }), {});
+    needsSessionRenewal = false;
+  }
+
+  return async function handleMessage(jsonText) {
+    let request;
+    try {
+      request = JSON.parse(jsonText);
+      if (!request || Array.isArray(request) || typeof request !== "object") {
+        throw new Error("Expected one MCP JSON-RPC message");
+      }
+      const initializing = request.method === "initialize";
+      if (initializing) {
+        sessionId = null;
+        protocolVersion = undefined;
+        initializeRequest = undefined;
+        needsSessionRenewal = false;
+      }
+      // A failed renewal must remain recoverable on the next call, rather than
+      // sending sessionless requests forever after a transient initialize error.
+      if (needsSessionRenewal && !initializing) {
+        await renewSession();
+        if (request.method === "notifications/initialized") return;
+      }
+      let response = await send(request);
+      if (response.statusCode === 404 && sessionId && !initializing) {
+        needsSessionRenewal = true;
+        await renewSession();
+        // Renewal already delivered this notification to the new session.
+        if (request.method === "notifications/initialized") return;
+        response = await send(request);
+      }
+      if (response.statusCode === 404 && sessionId && !initializing) needsSessionRenewal = true;
+      const { parsed, reply } = checkResponse(response, request);
+      if (initializing && reply?.result) {
+        initializeRequest = request;
+        rememberSession(response, reply);
+      }
+      // HTTP errors often use id:null or id:"server-error". Never pass those
+      // through as replies: the stdio client's pending request would time out.
+      if (Object.hasOwn(request, "id")) {
+        for (const message of parsed) {
+          if (typeof message.method === "string" || !Object.hasOwn(message, "id") || message === reply) {
+            writeJson(JSON.stringify(message));
+          }
+        }
+      }
+    } catch (error) {
+      if (request && Object.hasOwn(request, "id")) {
+        writeJson(JSON.stringify({
+          jsonrpc: "2.0",
+          id: request.id,
+          error: { code: -32000, message: error.message || String(error) },
+        }));
+      } else {
+        console.error(`wiki-manager: ${error.message || String(error)}`);
+      }
+    }
+  };
 }
 
 function startHttpBridge(mcpUrl) {
@@ -631,33 +756,13 @@ function startHttpBridge(mcpUrl) {
 
   let buffer = Buffer.alloc(0);
   let pendingLength = null;
-  let sessionId = null;
   let queue = Promise.resolve();
   const decoder = new StringDecoder("utf8");
   let inputMode = null; // "framed" | "ndjson"
-
-  async function handleMessage(jsonText) {
-    const response = await postMcpJson(mcpUrl, jsonText, sessionId);
-    const maybeSession = response.headers["mcp-session-id"];
-    if (typeof maybeSession === "string" && maybeSession.length > 0) {
-      sessionId = maybeSession;
-    }
-
-    const contentType = String(response.headers["content-type"] || "");
+  const handleMessage = createMcpMessageHandler(mcpUrl, (jsonText) => {
     const writeJson = inputMode === "ndjson" ? writeNdjson : writeFramedJson;
-    if (contentType.includes("text/event-stream")) {
-      const messages = parseSseMessages(response.body);
-      for (const msg of messages) {
-        writeJson(msg);
-      }
-      return;
-    }
-
-    const trimmed = response.body.trim();
-    if (trimmed.length > 0) {
-      writeJson(trimmed);
-    }
-  }
+    writeJson(jsonText);
+  });
 
   process.stdin.on("data", (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
@@ -813,4 +918,6 @@ if (require.main === module) {
 module.exports = {
   canonicalRepositoryRoot,
   deriveResourceNames,
+  createMcpMessageHandler,
+  postMcpJson,
 };

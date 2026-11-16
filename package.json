@@ -1,6 +1,6 @@
 {
   "name": "@ihorleleka/wiki-kit",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "Installer and runner assets for wiki-manager agent wiki-kit integration.",
   "repository": {
     "type": "git",
@@ -25,7 +25,8 @@
   },
   "scripts": {
     "test": "npm run verify",
-    "verify": "node scripts/verify.js && node scripts/verify-dsh-mcp.js",
+    "verify": "node scripts/verify.js && node scripts/verify-dsh-mcp.js && node scripts/verify-http-bridge.js",
+    "verify:http-bridge": "node scripts/verify-http-bridge.js",
     "verify:dsh-mcp": "node scripts/verify-dsh-mcp.js",
     "verify:runner": "node scripts/verify-runner.js"
   },

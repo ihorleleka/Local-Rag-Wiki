@@ -116,6 +116,20 @@ npx github:ihorleleka/Local-Rag-Wiki doctor . --live
 `start .`, `stop .`, and `pull .` are available the same way. The repository
 container persists independently of individual agent clients.
 
+### Long-running MCP sessions
+
+The HTTP backend can expire idle MCP sessions while remaining healthy. The
+managed stdio runner renews a missing session on HTTP 404, then retries the
+rejected request once without restarting MCP or the container. Other HTTP and
+transport failures return errors with the caller's request ID instead of leaving
+calls pending. A 30-second wall-clock HTTP deadline also bounds stalled SSE
+responses, even when keepalive traffic continues. Network failures and timeouts
+are not automatically retried: a write may already have executed.
+
+For an older installed runner, update the managed workspace files and reconnect
+its MCP client once to load the fix. A container/image replacement is not required
+for this runner-only fix.
+
 ## Crash-dump protection
 
 Starting with 0.2.5, the Linux backend disables process core dumps before loading native dependencies,
