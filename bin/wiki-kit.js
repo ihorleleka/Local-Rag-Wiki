@@ -303,14 +303,14 @@ function removeLegacyUnmarkedAgentsPolicy(existing, templateContent) {
   return `${existing.slice(0, blockStart)}${existing.slice(blockEnd)}`;
 }
 
-function mergeAgentsPolicy(existing, templateContent) {
+function mergeAgentsPolicy(existing, templateContent, migrateLegacy = true) {
   const block = templateContent.trim();
   const beginIndex = existing.indexOf(AGENTS_POLICY_BEGIN);
   const endIndex = beginIndex === -1 ? -1 : existing.indexOf(AGENTS_POLICY_END, beginIndex);
   let unmanaged = existing;
   if (beginIndex !== -1 && endIndex !== -1) {
     unmanaged = `${existing.slice(0, beginIndex)}${existing.slice(endIndex + AGENTS_POLICY_END.length)}`;
-  } else {
+  } else if (migrateLegacy) {
     unmanaged = removeLegacyUnmarkedAgentsPolicy(existing, templateContent);
   }
   if (!unmanaged.trim()) return `${block}\n`;
@@ -534,7 +534,7 @@ function mergeJsonRootAsset(sourcePath, targetPath, relativePath, options) {
       ["servers", "wiki-manager"],
       wikiManagerVscodeServer(sourcePath, options.agentsDir)
     );
-  } else if (relativePath === ".claude/settings.local.json") {
+  } else if (relativePath === ".mcp.json") {
     content = setJsoncPath(content, ["mcpServers", "wiki-manager"], wikiManagerJsonServer(options.agentsDir));
   } else if (relativePath === "opencode.jsonc") {
     content = setJsoncPath(content, ["mcp", "wiki-manager"], {
@@ -599,10 +599,10 @@ function mergeCodexToml(existing, templateContent) {
 function writeRootAsset(sourcePath, targetPath, relativePath, options) {
   const sourceContent = rewriteAgentsDir(fs.readFileSync(sourcePath, "utf8"), options.agentsDir);
 
-  if (relativePath === "AGENTS.md") {
+  if (["AGENTS.md", "CLAUDE.md"].includes(relativePath)) {
     const existing = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, "utf8") : "";
     ensureDir(path.dirname(targetPath));
-    fs.writeFileSync(targetPath, mergeAgentsPolicy(existing, sourceContent), "utf8");
+    fs.writeFileSync(targetPath, mergeAgentsPolicy(existing, sourceContent, relativePath === "AGENTS.md"), "utf8");
     return "merged";
   }
 
@@ -614,7 +614,7 @@ function writeRootAsset(sourcePath, targetPath, relativePath, options) {
   }
 
   if (
-    [".vscode/mcp.json", ".claude/settings.local.json", "opencode.jsonc"].includes(relativePath)
+    [".vscode/mcp.json", ".mcp.json", "opencode.jsonc"].includes(relativePath)
   ) {
     mergeJsonRootAsset(sourcePath, targetPath, relativePath, options);
     return "merged";
@@ -629,6 +629,16 @@ function writeRootAsset(sourcePath, targetPath, relativePath, options) {
   ensureDir(path.dirname(targetPath));
   fs.writeFileSync(targetPath, sourceContent, "utf8");
   return "copied";
+}
+
+// Materialize Claude's discovery surface from the shared skill source, rather
+// than maintaining a second skill body or requiring symlink privileges.
+function claudeSkillAssets() {
+  const sourceRoot = path.join(PACKAGE_ROOT, "templates", "root", ".agents", "skills", "wiki");
+  return ["SKILL.md", "references/authoring.md"].map((relativePath) => ({
+    relativePath: `.claude/skills/wiki/${relativePath}`,
+    sourcePath: path.join(sourceRoot, relativePath),
+  }));
 }
 
 function copyRootPayload(targetRoot, options) {
@@ -656,6 +666,13 @@ function copyRootPayload(targetRoot, options) {
         result
       );
     }
+  }
+
+  for (const { relativePath, sourcePath } of claudeSkillAssets()) {
+    const targetPath = path.join(targetRoot, relativePath);
+    ensureDir(path.dirname(targetPath));
+    fs.writeFileSync(targetPath, fs.readFileSync(sourcePath, "utf8"), "utf8");
+    result.copied.push(relativePath);
   }
 
   return result;
@@ -749,7 +766,8 @@ function describeMarker(agentsRoot) {
 
 function compareRootAssets(targetRoot, agentsDir) {
   const sourceRoot = path.join(PACKAGE_ROOT, "templates", "root");
-  const files = collectTemplateFiles(sourceRoot);
+  const generatedSkills = new Map(claudeSkillAssets().map((asset) => [asset.relativePath, asset.sourcePath]));
+  const files = [...collectTemplateFiles(sourceRoot), ...generatedSkills.keys()];
   const result = {
     current: [],
     changed: [],
@@ -758,7 +776,7 @@ function compareRootAssets(targetRoot, agentsDir) {
 
   for (const relativePath of files) {
     const portablePath = relativePath.replace(/\\/g, "/");
-    const sourcePath = path.join(sourceRoot, relativePath);
+    const sourcePath = generatedSkills.get(portablePath) || path.join(sourceRoot, relativePath);
     const targetPath = path.join(targetRoot, relativePath);
     if (!fs.existsSync(targetPath)) {
       result.missing.push(portablePath);
@@ -766,11 +784,11 @@ function compareRootAssets(targetRoot, agentsDir) {
     }
     const expected = rewriteAgentsDir(fs.readFileSync(sourcePath, "utf8"), agentsDir);
     const actual = fs.readFileSync(targetPath, "utf8");
-    if (portablePath === "AGENTS.md" && actual.includes(expected.trim())) {
+    if (["AGENTS.md", "CLAUDE.md"].includes(portablePath) && actual.includes(expected.trim())) {
       result.current.push(portablePath);
     } else if (portablePath === ".codex/config.toml" && actual.includes(expected.trim())) {
       result.current.push(portablePath);
-    } else if ([".vscode/mcp.json", ".claude/settings.local.json", "opencode.jsonc", ".dsh/mcp.servers.yml"].includes(portablePath)) {
+    } else if ([".vscode/mcp.json", ".mcp.json", "opencode.jsonc", ".dsh/mcp.servers.yml"].includes(portablePath)) {
       const validation = validateMcpConfig(targetRoot, agentsDir, portablePath);
       (validation.state === "current" ? result.current : result.changed).push(portablePath);
     } else if (portablePath === ".vscode/settings.json") {
@@ -872,7 +890,7 @@ function validateMcpConfig(targetRoot, agentsDir, configFile) {
       }
       let servers;
       if (configFile === ".vscode/mcp.json") servers = config.servers;
-      if (configFile === ".claude/settings.local.json") servers = config.mcpServers;
+      if (configFile === ".mcp.json") servers = config.mcpServers;
       if (configFile === "opencode.jsonc") servers = config.mcp;
       if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
         return { state: "changed", detail: "wiki-manager server collection is missing", additions: 0 };
@@ -910,7 +928,7 @@ function validateMcpConfig(targetRoot, agentsDir, configFile) {
 
 function checkMcpReferences(targetRoot, agentsDir) {
   const configFiles = [
-    ".claude/settings.local.json",
+    ".mcp.json",
     ".vscode/mcp.json",
     "opencode.jsonc",
     ".codex/config.toml",

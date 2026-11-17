@@ -29,6 +29,38 @@ under `.dsh/`; it is never installed as a repository-root
 per repository when a configured agent client connects. Pre-pulling the image
 (above) is recommended before running the agent in a fresh environment.
 
+## Claude Code
+
+The installer delivers Claude Code's project-native integration surfaces:
+
+- Root `.mcp.json` defines `wiki-manager` under `mcpServers`, pointing to the
+  managed Node runner. Existing unrelated MCP servers are preserved.
+- `.claude/skills/wiki/SKILL.md` and its authoring reference are materialized from
+  the shared `.agents/skills/wiki` source. Use `/wiki` in Claude Code (`$wiki` is
+  the invocation used by other clients). Updates refresh this managed skill even
+  without `--force`, while preserving other skill directories.
+- `CLAUDE.md` receives a bounded, managed wiki-policy section; existing project
+  instructions outside that section are preserved.
+
+The installer does not add MCP definitions to `.claude/settings.local.json`.
+Older installations may still contain an obsolete `mcpServers.wiki-manager`
+entry there; updates leave that file, user hooks, permissions, and other local
+preferences untouched. Review/remove that obsolete entry yourself if desired.
+No server approval or tool permission is granted automatically: accept the
+workspace/project MCP trust prompts as appropriate, then check `/mcp` and confirm
+`/wiki` is listed in a fresh Claude session. Docker must be available for MCP
+startup. `--skip-root` omits all these Claude integration surfaces.
+
+The `.agents/plugins/marketplace.json` catalog is for other agent tooling, not a
+Claude Code marketplace. This integration uses project skills and project MCP
+configuration directly; no Claude plugin installation is required.
+
+Compatibility was checked against the live official documentation on
+2026-11-17, not a version-pinned historical snapshot: [skills and discovery](https://code.claude.com/docs/en/skills.md),
+[project MCP configuration and trust](https://code.claude.com/docs/en/mcp.md),
+[settings scope](https://code.claude.com/docs/en/settings.md), and
+[Claude plugin marketplaces](https://code.claude.com/docs/en/plugin-marketplaces.md).
+
 ## DeepSeek Harness
 
 The native bundle supports DSH `>=0.2.1-rc.5 <0.3.0-0`. A DSH `0.3.0`

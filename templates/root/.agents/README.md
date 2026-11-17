@@ -31,7 +31,13 @@ default. The update owns only the managed wiki policy section and the
 `wiki-manager` MCP server entries.
 
 The MCP entrypoint is `run-wiki-manager.mcp.js`. Repository-level agent policy
-and editor MCP configuration live in the repository root.
+and editor MCP configuration live in the repository root. Claude Code uses root
+`.mcp.json`, a managed policy section in `CLAUDE.md`, and `/wiki` discovered from
+`.claude/skills/wiki/`. The Claude skill and authoring reference are generated
+from this directory's shared skill source on every update. Other Claude skills
+and `.claude/settings.local.json` remain user-owned; the installer does not grant
+MCP approvals or tool permissions. The `plugins/` catalog is not a Claude Code
+marketplace, and this project-native integration requires no Claude plugin.
 
 The MCP endpoint binds to `127.0.0.1` by default because it has no built-in
 authentication and includes write tools. Intentional network exposure requires

@@ -183,6 +183,20 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
       );
     }
   }
+  const claudePolicy = fs.readFileSync(path.join(targetRoot, "CLAUDE.md"), "utf8");
+  for (const marker of ["<!-- BEGIN WIKI-KIT MANAGED WIKI POLICY -->", "<!-- END WIKI-KIT MANAGED WIKI POLICY -->"]) {
+    assert(claudePolicy.split(marker).length - 1 === 1, "managed CLAUDE policy markers are missing or duplicated");
+  }
+  assert(claudePolicy.includes("/wiki"), "CLAUDE.md must advertise the native /wiki skill");
+  assert(claudePolicy.includes(".claude/skills/wiki/SKILL.md"), "CLAUDE.md must identify the native Claude skill");
+  for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
+    const canonical = fs.readFileSync(path.join(ROOT, "templates", "root", ".agents", "skills", "wiki", relativePath));
+    const native = fs.readFileSync(path.join(targetRoot, ".claude", "skills", "wiki", relativePath));
+    assert(native.equals(canonical), `native Claude wiki guidance differs from canonical template: ${relativePath}`);
+  }
+  const claudeConfig = readJson(path.join(targetRoot, ".mcp.json"));
+  assert(claudeConfig.mcpServers?.["wiki-manager"]?.command === "node", "root Claude MCP command is incorrect");
+  assert(claudeConfig.mcpServers["wiki-manager"].args?.[0] === `${agentsDir}/run-wiki-manager.mcp.js`, "root Claude MCP runner path is incorrect");
   assert(fs.existsSync(integrationManifestPath), "integration manifest missing");
   assert(fs.existsSync(marketplacePath), "plugin marketplace metadata missing");
   assert(fs.existsSync(dshMcpPath), "DeepSeek Harness MCP configuration missing");
@@ -322,11 +336,17 @@ function assertMergedInstall(targetRoot, agentsDir) {
     "VS Code MCP runner path was not refreshed"
   );
 
-  const claudeConfig = readJson(path.join(targetRoot, ".claude", "settings.local.json"));
-  assert(claudeConfig.mcpServers["other-wiki-kit"], "existing Claude MCP server was not preserved");
-  assert(claudeConfig.mcpServers["wiki-manager"], "wiki-manager Claude MCP server was not merged");
-  assert(JSON.stringify(claudeConfig.hooks || {}).includes("node user-hook.js"), "unrelated Claude hook was not preserved");
-  assert(JSON.stringify(claudeConfig.hooks || {}).includes("auto-capture.js"), "existing Claude hooks were unexpectedly removed");
+  const claudeConfig = readJson(path.join(targetRoot, ".mcp.json"));
+  assert(claudeConfig.mcpServers["other-wiki-kit"]?.args?.[0] === "other.js", "existing root Claude MCP server was not preserved");
+  assert(claudeConfig.mcpServers["wiki-manager"], "wiki-manager root Claude MCP server was not merged");
+  assert(claudeConfig.userOwned === "keep", "unrelated root Claude MCP configuration was not preserved");
+  const localSettings = readJson(path.join(targetRoot, ".claude", "settings.local.json"));
+  assert(JSON.stringify(localSettings.hooks || {}).includes("node user-hook.js"), "unrelated Claude hook was not preserved");
+  assert(JSON.stringify(localSettings.hooks || {}).includes("auto-capture.js"), "existing Claude hooks were unexpectedly removed");
+  const claudePolicy = fs.readFileSync(path.join(targetRoot, "CLAUDE.md"), "utf8");
+  assert(claudePolicy.includes("Local Claude Knowledge Scope content."), "local CLAUDE instructions were overwritten");
+  assert(claudePolicy.includes("# More Claude instructions"), "trailing local CLAUDE instructions were overwritten");
+  assert(fs.readFileSync(path.join(targetRoot, ".claude", "skills", "custom", "SKILL.md"), "utf8") === "# Custom Claude\n", "custom native Claude skill was overwritten");
 
   const opencodeConfig = readJson(path.join(targetRoot, "opencode.jsonc"));
   assert(opencodeConfig.mcp["other-wiki-kit"], "existing OpenCode MCP server was not preserved");
@@ -375,6 +395,7 @@ function verifyDefaultInstall() {
   prepareScratch(DEFAULT_SMOKE_ROOT);
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", DEFAULT_SMOKE_ROOT, "--force"]);
   assertInstall(DEFAULT_SMOKE_ROOT, ".agents");
+  assert(!fs.existsSync(path.join(DEFAULT_SMOKE_ROOT, ".claude", "settings.local.json")), "fresh install must not create Claude local settings");
   const defaultStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", DEFAULT_SMOKE_ROOT]);
   assert(defaultStatus.stdout.includes("Agents dir: .agents"), "status did not report default agents dir");
   assert(defaultStatus.stdout.includes("Install marker: present"), "status did not report install marker");
@@ -408,6 +429,7 @@ function verifyDefaultInstall() {
     );
   }
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", DEFAULT_SMOKE_ROOT]);
+  verifyNativeSkillRefresh(DEFAULT_SMOKE_ROOT, ".agents");
 }
 
 function verifyMergedInstall() {
@@ -416,7 +438,24 @@ function verifyMergedInstall() {
   fs.mkdirSync(path.join(mergeRoot, ".agents", "skills", "custom"), { recursive: true });
   fs.writeFileSync(path.join(mergeRoot, ".agents", "skills", "custom", "SKILL.md"), "# Custom\n", "utf8");
   fs.mkdirSync(path.join(mergeRoot, ".vscode"), { recursive: true });
-  fs.mkdirSync(path.join(mergeRoot, ".claude"), { recursive: true });
+  fs.mkdirSync(path.join(mergeRoot, ".claude", "skills", "custom"), { recursive: true });
+  fs.writeFileSync(path.join(mergeRoot, ".claude", "skills", "custom", "SKILL.md"), "# Custom Claude\n", "utf8");
+  fs.writeFileSync(
+    path.join(mergeRoot, "CLAUDE.md"),
+    "# Existing Claude instructions\r\n\r\n## Knowledge Scope\r\n\r\nLocal Claude Knowledge Scope content.\r\n\r\n# More Claude instructions\r\n",
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(mergeRoot, ".mcp.json"),
+    `${JSON.stringify({
+      userOwned: "keep",
+      mcpServers: {
+        "other-wiki-kit": { command: "node", args: ["other.js"] },
+        "wiki-manager": { command: "outdated", args: ["old-runner.js"] },
+      },
+    }, null, 2)}\n`,
+    "utf8"
+  );
   fs.mkdirSync(path.join(mergeRoot, ".codex"), { recursive: true });
   fs.writeFileSync(
     path.join(mergeRoot, "AGENTS.md"),
@@ -436,7 +475,11 @@ function verifyMergedInstall() {
   fs.writeFileSync(
     path.join(mergeRoot, ".claude", "settings.local.json"),
     `${JSON.stringify({
-      mcpServers: { "other-wiki-kit": { command: "node", args: ["other.js"] } },
+      mcpServers: {
+        "other-wiki-kit": { command: "node", args: ["other.js"] },
+        "wiki-manager": { command: "legacy-user-command", args: ["do-not-migrate.js"] },
+      },
+      permissions: { allow: ["Bash(node user-script.js)"] },
       hooks: {
         Stop: [{ matcher: "*", hooks: [
           { type: "command", command: "node .agents/scripts/auto-capture.js" },
@@ -456,11 +499,20 @@ function verifyMergedInstall() {
     '[mcp_servers.other-wiki-kit]\ncommand = "node"\nargs = ["other.js"]\n',
     "utf8"
   );
+  const localSettingsPath = path.join(mergeRoot, ".claude", "settings.local.json");
+  // Deliberate CRLF, indentation and legacy wiki-manager hooks/configuration: none may be migrated.
+  fs.writeFileSync(localSettingsPath, fs.readFileSync(localSettingsPath, "utf8").replace(/\n/g, "\r\n"), "utf8");
+  const originalLocalSettings = fs.readFileSync(localSettingsPath);
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", mergeRoot]);
+  assert(fs.readFileSync(localSettingsPath).equals(originalLocalSettings), "install changed existing Claude local settings bytes");
   assertInstall(mergeRoot, ".agents");
   assertMergedInstall(mergeRoot, ".agents");
   const idempotentFiles = [
     "AGENTS.md",
+    "CLAUDE.md",
+    ".mcp.json",
+    ".claude/skills/wiki/SKILL.md",
+    ".claude/skills/wiki/references/authoring.md",
     ".vscode/mcp.json",
     ".vscode/settings.json",
     ".claude/settings.local.json",
@@ -476,6 +528,11 @@ function verifyMergedInstall() {
       fs.readFileSync(path.join(mergeRoot, file), "utf8") === firstMerge.get(file),
       `repeated forced update was not idempotent for ${file}`
     );
+  }
+  assert(fs.readFileSync(localSettingsPath).equals(originalLocalSettings), "forced update changed existing Claude local settings bytes");
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", mergeRoot]);
+  for (const file of idempotentFiles) {
+    assert(fs.readFileSync(path.join(mergeRoot, file), "utf8") === firstMerge.get(file), `repeated unforced update was not idempotent for ${file}`);
   }
   assertMergedInstall(mergeRoot, ".agents");
   const mergedStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", mergeRoot]);
@@ -510,6 +567,33 @@ function verifyMergedInstall() {
   assertMergedInstall(mergeRoot, ".agents");
 }
 
+function verifyNativeSkillRefresh(targetRoot, agentsDir) {
+  for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
+    fs.writeFileSync(path.join(targetRoot, ".claude", "skills", "wiki", relativePath), "stale native skill\n", "utf8");
+    fs.writeFileSync(path.join(targetRoot, agentsDir, "skills", "wiki", relativePath), "stale canonical copy\n", "utf8");
+  }
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", targetRoot]);
+  assertDeliveredSurface(targetRoot, agentsDir);
+}
+
+function verifySkipRoot() {
+  const skipRoot = path.join(ARTIFACTS_ROOT, "verify-smoke-skip-root");
+  prepareScratch(skipRoot);
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", skipRoot, "--skip-root"]);
+  for (const relativePath of ["CLAUDE.md", ".mcp.json", ".claude"]) {
+    assert(!fs.existsSync(path.join(skipRoot, relativePath)), `--skip-root created Claude asset: ${relativePath}`);
+  }
+  fs.mkdirSync(path.join(skipRoot, ".claude", "skills", "wiki"), { recursive: true });
+  const userFiles = ["CLAUDE.md", ".mcp.json", ".claude/settings.local.json", ".claude/skills/wiki/SKILL.md"];
+  for (const relativePath of userFiles) fs.writeFileSync(path.join(skipRoot, relativePath), `user-owned ${relativePath}\r\n`, "utf8");
+  const originals = userFiles.map(relativePath => fs.readFileSync(path.join(skipRoot, relativePath)));
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", skipRoot, "--skip-root", "--force"]);
+  userFiles.forEach((relativePath, index) => {
+    assert(fs.readFileSync(path.join(skipRoot, relativePath)).equals(originals[index]), `--skip-root changed Claude asset: ${relativePath}`);
+  });
+  assert(!fs.existsSync(path.join(skipRoot, ".claude", "skills", "wiki", "references")), "--skip-root created native skill references");
+}
+
 function verifyDiagnostics() {
   const decoyRoot = path.join(ARTIFACTS_ROOT, "verify-smoke-mcp-decoy");
   prepareScratch(decoyRoot);
@@ -536,12 +620,31 @@ function verifyDiagnostics() {
     "[fail] managed wiki-manager entries are current"
   );
 
-  fs.writeFileSync(path.join(decoyRoot, ".claude", "settings.local.json"), "{ invalid", "utf8");
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", decoyRoot]);
+  const ignoredSettingsPath = path.join(decoyRoot, ".claude", "settings.local.json");
+  fs.writeFileSync(ignoredSettingsPath, "{ invalid local user settings\r\n", "utf8");
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", decoyRoot]);
+  assert(fs.readFileSync(ignoredSettingsPath, "utf8") === "{ invalid local user settings\r\n", "invalid user local settings were changed");
+  assertInstall(decoyRoot, ".agents");
+  const claudeMcpPath = path.join(decoyRoot, ".mcp.json");
+  const claudeMcp = readJson(claudeMcpPath);
+  delete claudeMcp.mcpServers["wiki-manager"];
+  fs.writeFileSync(claudeMcpPath, JSON.stringify(claudeMcp), "utf8");
+  const missingClaudeStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", decoyRoot]);
+  assert(missingClaudeStatus.stdout.includes(".mcp.json: wiki-manager entry is missing"), "status did not diagnose missing root Claude MCP entry");
+  fs.writeFileSync(claudeMcpPath, "{ invalid root MCP\r\n", "utf8");
+  const invalidMcp = fs.readFileSync(claudeMcpPath);
   const invalidStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", decoyRoot]);
   assert(
-    invalidStatus.stdout.includes(".claude/settings.local.json: unreadable or invalid"),
-    "status did not distinguish an unreadable MCP config"
+    invalidStatus.stdout.includes(".mcp.json: unreadable or invalid"),
+    "status did not distinguish an unreadable root Claude MCP config"
   );
+  assert(!invalidStatus.stdout.includes(".claude/settings.local.json"), "diagnostics still treat local Claude settings as managed MCP config");
+  for (const command of ["install", "update"]) {
+    expectFailure(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), command, decoyRoot, "--force"], "wiki-kit:");
+    assert(fs.readFileSync(claudeMcpPath).equals(invalidMcp), `${command} overwrote malformed root Claude MCP config`);
+  }
+  expectFailure(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "doctor", decoyRoot], "[fail] managed wiki-manager entries are current");
 }
 
 function verifyLegacyPolicy() {
@@ -559,6 +662,25 @@ function verifyLegacyPolicy() {
   run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", legacyAgentsRoot]);
   assertInstall(legacyAgentsRoot, ".agents");
   assertLegacyAgentsPolicyMigrated(legacyAgentsRoot);
+
+  const unmarkedClaudePolicy = [
+    "# Existing Claude instructions",
+    "",
+    "## Knowledge Governance",
+    "",
+    "This repository uses `$wiki` as the governed project knowledge workflow.",
+    "",
+    "User-owned instruction inside a legacy-looking policy must survive.",
+    "",
+    "Keep responses concise by default: changed files, verification, and decision-changing context.",
+    "",
+    "# More Claude instructions",
+  ].join("\n");
+  const claudePath = path.join(legacyAgentsRoot, "CLAUDE.md");
+  fs.writeFileSync(claudePath, `${unmarkedClaudePolicy}\n`, "utf8");
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", legacyAgentsRoot]);
+  assert(fs.readFileSync(claudePath, "utf8").includes(unmarkedClaudePolicy), "CLAUDE merge incorrectly migrated an unmarked user policy matching legacy AGENTS signatures");
+  assertInstall(legacyAgentsRoot, ".agents");
 }
 
 function verifyCustomInstall() {
@@ -572,6 +694,7 @@ function verifyCustomInstall() {
     "--force",
   ]);
   assertInstall(CUSTOM_SMOKE_ROOT, "wiki-kit-agent");
+  verifyNativeSkillRefresh(CUSTOM_SMOKE_ROOT, "wiki-kit-agent");
   const { findAgentsRoot } = require(path.join(ROOT, "packages", "dsh-local-rag-wiki", "workspace-runner.cjs"));
   assert(findAgentsRoot(CUSTOM_SMOKE_ROOT) === path.join(CUSTOM_SMOKE_ROOT, "wiki-kit-agent"), "workspace runner did not discover the custom installation");
   const customStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", CUSTOM_SMOKE_ROOT]);
@@ -658,6 +781,8 @@ function verifyPublishedPackage() {
     manifest.main,
     ...Object.values(manifest.exports),
     manifest.dsh.bundle.patch,
+    "templates/root/CLAUDE.md",
+    "templates/root/.mcp.json",
     "templates/root/.agents/skills/wiki/SKILL.md",
     "templates/root/.agents/skills/wiki/references/authoring.md",
     "templates/root/.agents/skills/wiki/agents/openai.yaml",
@@ -676,6 +801,7 @@ function main() {
     ["fresh install and invalid options", verifyDefaultInstall],
     ["user configuration preservation and idempotent updates", verifyMergedInstall],
     ["missing and malformed configuration diagnostics", verifyDiagnostics],
+    ["skip-root excludes Claude assets", verifySkipRoot],
     ["legacy policy migration", verifyLegacyPolicy],
     ["custom installation and update wrapper", verifyCustomInstall],
     ["ambiguous installation rejection", verifyAmbiguousInstall],
