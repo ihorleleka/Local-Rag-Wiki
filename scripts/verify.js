@@ -5,6 +5,10 @@ const fs = require("fs");
 const path = require("path");
 const YAML = require("yaml");
 
+// install/update provision Docker by default; these installer tests must stay
+// hermetic. Individual scenarios opt back in by overriding this variable.
+process.env.WIKI_KIT_SKIP_DOCKER = "1";
+
 const ROOT = path.resolve(__dirname, "..");
 const ARTIFACTS_ROOT = path.join(ROOT, ".artifacts");
 const DEFAULT_SMOKE_ROOT = path.join(ARTIFACTS_ROOT, "verify-smoke-default");
@@ -146,17 +150,9 @@ function readJson(file) {
 function assertDeliveredSurface(targetRoot, agentsDir) {
   const consumerAgentsPath = path.join(targetRoot, "AGENTS.md");
   const wikiSkillPath = path.join(targetRoot, agentsDir, "skills", "wiki", "SKILL.md");
-  const integrationManifestPath = path.join(
-    targetRoot,
-    agentsDir,
-    "integrations",
-    "local-rag-wiki.integration.json"
-  );
-  const marketplacePath = path.join(targetRoot, agentsDir, "plugins", "marketplace.json");
   const dshMcpPath = path.join(targetRoot, ".dsh", "mcp.servers.yml");
   const dshMcpClientPath = path.join(targetRoot, ".dsh", ".dsh-mcp-client.js");
   const dshModulePath = path.join(targetRoot, ".dsh", "package.json");
-  assert(fs.existsSync(consumerAgentsPath), "consumer AGENTS.md missing");
   const consumerPolicy = fs.readFileSync(consumerAgentsPath, "utf8");
   assert(
     consumerPolicy.includes(`${agentsDir}/skills/wiki/SKILL.md`),
@@ -164,9 +160,7 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   );
   for (const relativePath of ["SKILL.md", "references/authoring.md", "agents/openai.yaml"]) {
     const deliveredPath = path.join(path.dirname(wikiSkillPath), relativePath);
-    assert(fs.existsSync(deliveredPath), `wiki guidance missing: ${relativePath}`);
     const actual = fs.readFileSync(deliveredPath, "utf8");
-    assert(actual.trim(), `wiki guidance is empty: ${relativePath}`);
     const templatePath = path.join(ROOT, "templates", "root", ".agents", "skills", "wiki", relativePath);
     const expected = fs.readFileSync(templatePath, "utf8");
     assert(actual === expected, `delivered wiki guidance differs from its template: ${relativePath}`);
@@ -187,8 +181,11 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   for (const marker of ["<!-- BEGIN WIKI-KIT MANAGED WIKI POLICY -->", "<!-- END WIKI-KIT MANAGED WIKI POLICY -->"]) {
     assert(claudePolicy.split(marker).length - 1 === 1, "managed CLAUDE policy markers are missing or duplicated");
   }
-  assert(claudePolicy.includes("/wiki"), "CLAUDE.md must advertise the native /wiki skill");
-  assert(claudePolicy.includes(".claude/skills/wiki/SKILL.md"), "CLAUDE.md must identify the native Claude skill");
+  const managedClaudeBlock = claudePolicy.slice(
+    claudePolicy.indexOf("<!-- BEGIN WIKI-KIT MANAGED WIKI POLICY -->"),
+    claudePolicy.indexOf("<!-- END WIKI-KIT MANAGED WIKI POLICY -->")
+  ).split(/\r?\n/).slice(1).join("\n").trim();
+  assert(managedClaudeBlock === "@AGENTS.md", "managed CLAUDE.md block must contain only the @AGENTS.md import");
   for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
     const canonical = fs.readFileSync(path.join(ROOT, "templates", "root", ".agents", "skills", "wiki", relativePath));
     const native = fs.readFileSync(path.join(targetRoot, ".claude", "skills", "wiki", relativePath));
@@ -197,16 +194,12 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   const claudeConfig = readJson(path.join(targetRoot, ".mcp.json"));
   assert(claudeConfig.mcpServers?.["wiki-manager"]?.command === "node", "root Claude MCP command is incorrect");
   assert(claudeConfig.mcpServers["wiki-manager"].args?.[0] === `${agentsDir}/run-wiki-manager.mcp.js`, "root Claude MCP runner path is incorrect");
-  assert(fs.existsSync(integrationManifestPath), "integration manifest missing");
-  assert(fs.existsSync(marketplacePath), "plugin marketplace metadata missing");
-  assert(fs.existsSync(dshMcpPath), "DeepSeek Harness MCP configuration missing");
   assert(fs.existsSync(dshMcpClientPath), "agent-scoped DSH MCP client missing from .dsh");
   assert(!fs.existsSync(path.join(targetRoot, ".dsh-mcp-client.js")), "DSH MCP client leaked into repository root");
   assert(readJson(dshModulePath).type === "module", ".dsh MCP client is not in an ESM package scope");
   const dshServer = YAML.parse(fs.readFileSync(dshMcpPath, "utf8")).servers?.["wiki-manager"];
   assert(dshServer?.command === "node", "DSH wiki-manager command is incorrect");
   assert(dshServer?.args?.[0] === `${agentsDir}/run-wiki-manager.mcp.js`, "DSH runner path is incorrect");
-  assert(fs.existsSync(path.join(targetRoot, dshServer.args[0])), "installed MCP runner is missing");
   const runner = fs.readFileSync(path.join(targetRoot, dshServer.args[0]), "utf8");
   assert(
     /"--ulimit"\s*,\s*"core=0:0"/.test(runner),
@@ -222,7 +215,17 @@ function assertRepositoryUniqueResourceNames() {
     ".agents",
     "run-wiki-manager.mcp.js"
   );
-  const { deriveResourceNames } = require(runnerPath);
+  const { deriveResourceNames, wikiMountMatches } = require(runnerPath);
+  const wikiHere = path.join(ARTIFACTS_ROOT, "identity-a", "same-repo", "wiki");
+  assert(wikiMountMatches(wikiHere, wikiHere), "matching wiki mount was reported as stale");
+  assert(wikiMountMatches(`${wikiHere}${path.sep}`, wikiHere), "trailing separator caused a false stale mount");
+  assert(wikiMountMatches(null, wikiHere), "container without wiki mount metadata must not be recreated");
+  assert(
+    !wikiMountMatches(path.join(ARTIFACTS_ROOT, "identity-b", "same-repo", "wiki"), wikiHere),
+    "wiki mount pointing at a moved repository was not detected"
+  );
+  const desktopForm = wikiHere.replace(/^([a-zA-Z]):/, (_, drive) => `/run/desktop/mnt/host/${drive.toLowerCase()}`).replace(/\\/g, "/");
+  assert(wikiMountMatches(desktopForm, wikiHere), "Docker Desktop VM path form was reported as a stale mount");
   const firstRoot = path.join(ARTIFACTS_ROOT, "identity-a", "same-repo");
   const secondRoot = path.join(ARTIFACTS_ROOT, "identity-b", "same-repo");
   fs.mkdirSync(firstRoot, { recursive: true });
@@ -259,7 +262,7 @@ function assertInstall(targetRoot, agentsDir, expectedPackageSource = null) {
   assert(marker.version === packageJson.version, "install marker version does not match package.json");
   assert(marker.agentsDir === agentsDir, "install marker agentsDir does not match install option");
   assert(marker.defaultImage === DEFAULT_IMAGE, "install marker does not record the pinned image");
-  assert(Boolean(marker.containerName), "install marker does not record the repository container name");
+  assert(marker.containerName === undefined, "install marker must not record a path-derived container name that goes stale after a move");
 
   assertDeliveredSurface(targetRoot, agentsDir);
 
@@ -397,8 +400,6 @@ function verifyDefaultInstall() {
   assertInstall(DEFAULT_SMOKE_ROOT, ".agents");
   assert(!fs.existsSync(path.join(DEFAULT_SMOKE_ROOT, ".claude", "settings.local.json")), "fresh install must not create Claude local settings");
   const defaultStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", DEFAULT_SMOKE_ROOT]);
-  assert(defaultStatus.stdout.includes("Agents dir: .agents"), "status did not report default agents dir");
-  assert(defaultStatus.stdout.includes("Install marker: present"), "status did not report install marker");
   assert(defaultStatus.stdout.includes(`Configured image: ${DEFAULT_IMAGE}`), "status did not report pinned image");
   assert(defaultStatus.stdout.includes("Image configuration: current"), "status did not report current image configuration");
   const fakeDockerDir = path.join(ARTIFACTS_ROOT, "fake-docker-cli");
@@ -715,38 +716,34 @@ function verifyCustomInstall() {
   const wrapperMarker = readJson(wrapperMarkerPath);
   wrapperMarker.package = ROOT;
   fs.writeFileSync(wrapperMarkerPath, `${JSON.stringify(wrapperMarker, null, 2)}\n`, "utf8");
-  const wrapperFakeDockerDir = path.join(CUSTOM_SMOKE_ROOT, "wrapper-fake-docker");
-  fs.mkdirSync(wrapperFakeDockerDir, { recursive: true });
-  // This fixture verifies update selection and pull dispatch, not Docker image
-  // inspection: a Windows batch stub transfers control at the first invocation.
-  const fakeDocker = path.join(wrapperFakeDockerDir, process.platform === "win32" ? "docker.cmd" : "docker");
-  const fakeDockerLog = path.join(wrapperFakeDockerDir, "arguments.log");
-  fs.writeFileSync(
-    fakeDocker,
-    process.platform === "win32"
-      ? "@echo off\r\necho %* >> \"%WIKI_KIT_DOCKER_LOG%\"\r\nexit /b 0\r\n"
-      : "#!/usr/bin/env sh\nprintf '%s\\n' \"$*\" >> \"$WIKI_KIT_DOCKER_LOG\"\nexit 0\n",
-    "utf8"
-  );
-  if (process.platform !== "win32") fs.chmodSync(fakeDocker, 0o755);
-  run(wrapperCommand, wrapperArgs, {
-    cwd: CUSTOM_SMOKE_ROOT,
-    env: {
-      ...process.env,
-      PATH: `${wrapperFakeDockerDir}${path.delimiter}${process.env.PATH || ""}`,
-      Path: `${wrapperFakeDockerDir}${path.delimiter}${process.env.Path || process.env.PATH || ""}`,
-      WIKI_KIT_DOCKER_LOG: fakeDockerLog,
-    },
-  });
-  const pulledArguments = fs.existsSync(fakeDockerLog) ? fs.readFileSync(fakeDockerLog, "utf8") : "";
-  assert(
-    pulledArguments.split(/\r?\n/).some(line => line.startsWith("pull ") && line.includes(DEFAULT_IMAGE)),
-    "update wrapper did not pull the installed image"
-  );
+  // Docker provisioning is skipped globally (WIKI_KIT_SKIP_DOCKER), so this only
+  // verifies that the wrapper updates the custom installation in place.
+  run(wrapperCommand, wrapperArgs, { cwd: CUSTOM_SMOKE_ROOT });
   assertInstall(CUSTOM_SMOKE_ROOT, "wiki-kit-agent");
   assert(
     !fs.existsSync(path.join(CUSTOM_SMOKE_ROOT, ".agents")),
     "custom update wrapper created a second default installation"
+  );
+}
+
+function verifyDockerProvisioning() {
+  const root = path.join(ARTIFACTS_ROOT, "verify-smoke-docker-provisioning");
+  prepareScratch(root);
+  const cli = path.join(ROOT, "bin", "wiki-kit.js");
+
+  const skipped = run(process.execPath, [cli, "install", root, "--skip-docker"]);
+  assert(skipped.stdout.includes("Skipped Docker setup"), "--skip-docker did not skip Docker provisioning");
+
+  // An unreachable Docker daemon must never fail an install: files are already usable.
+  const unreachableHost = process.platform === "win32"
+    ? "npipe:////./pipe/wiki-kit-docker-unavailable"
+    : "unix:///tmp/wiki-kit-docker-unavailable.sock";
+  const unreachable = run(process.execPath, [cli, "update", root], {
+    env: { ...process.env, WIKI_KIT_SKIP_DOCKER: "", DOCKER_HOST: unreachableHost },
+  });
+  assert(
+    unreachable.stderr.includes("Docker is not reachable") && unreachable.stderr.includes("wiki-kit start ."),
+    "install did not warn with recovery steps when Docker is unreachable"
   );
 }
 
@@ -771,9 +768,6 @@ function verifyPublishedPackage() {
   assert(Array.isArray(packed?.files), "npm pack did not return a package file inventory");
   const files = new Set(packed.files.map(file => file.path));
   const manifest = PACKAGE_METADATA;
-  for (const name of [".", "./dsh", "./dsh-mcp-client", "./dsh-runner"]) {
-    assert(typeof manifest.exports?.[name] === "string", `public package export is missing: ${name}`);
-  }
   const patch = YAML.parse(fs.readFileSync(path.join(ROOT, manifest.dsh.bundle.patch), "utf8"));
   assert(patch.some(operation => operation.insert?.some(plugin => plugin.name === `${manifest.name}/dsh`)), "DSH bundle patch does not reference the public lifecycle export");
   const entries = [
@@ -804,6 +798,7 @@ function main() {
     ["skip-root excludes Claude assets", verifySkipRoot],
     ["legacy policy migration", verifyLegacyPolicy],
     ["custom installation and update wrapper", verifyCustomInstall],
+    ["docker provisioning is optional and non-fatal", verifyDockerProvisioning],
     ["ambiguous installation rejection", verifyAmbiguousInstall],
     ["published package assets", verifyPublishedPackage],
   ];

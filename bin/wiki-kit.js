@@ -35,8 +35,8 @@ const MANAGED_AGENT_DIRS = ["integrations", "plugins"];
 
 function printUsage() {
   console.log(`Usage:
-  wiki-kit install [target] [--force] [--agents-dir <dir>] [--skip-root]
-  wiki-kit update [target] [--force] [--agents-dir <dir>] [--skip-root]
+  wiki-kit install [target] [--force] [--agents-dir <dir>] [--skip-root] [--skip-docker]
+  wiki-kit update [target] [--force] [--agents-dir <dir>] [--skip-root] [--skip-docker]
   wiki-kit status [target] [--agents-dir <dir>]
   wiki-kit doctor [target] [--agents-dir <dir>] [--live]
   wiki-kit start [target] [--agents-dir <dir>]
@@ -66,6 +66,7 @@ function parseArgs(argv) {
     agentsDirProvided: false,
     force: false,
     skipRoot: false,
+    skipDocker: process.env.WIKI_KIT_SKIP_DOCKER === "1",
     live: false,
   };
 
@@ -82,6 +83,8 @@ function parseArgs(argv) {
       options.live = true;
     } else if (arg === "--skip-root") {
       options.skipRoot = true;
+    } else if (arg === "--skip-docker") {
+      options.skipDocker = true;
     } else if (arg === "--agents-dir") {
       const value = args.shift();
       if (!value) throw new Error("--agents-dir requires a value");
@@ -234,7 +237,6 @@ function writeMarker(agentsRoot, options) {
     installedAt: new Date().toISOString(),
     agentsDir: options.agentsDir,
     defaultImage: DEFAULT_IMAGE,
-    containerName: deriveResourceNames(options.targetRoot).containerName,
   };
   fs.writeFileSync(
     path.join(agentsRoot, MARKER_FILE),
@@ -540,7 +542,7 @@ function mergeJsonRootAsset(sourcePath, targetPath, relativePath, options) {
     content = setJsoncPath(content, ["mcp", "wiki-manager"], {
       type: "local",
       enabled: true,
-      timeout: 75000,
+      timeout: 150000,
       command: ["node", `${options.agentsDir.replace(/\\/g, "/")}/run-wiki-manager.mcp.js`],
     });
     const config = JSON.parse(stripJsonComments(content));
@@ -1001,9 +1003,7 @@ function runStatus(options) {
   const skillPath = path.join(agentsRoot, "skills", "wiki", "SKILL.md");
   const wikiPath = path.join(targetRoot, "wiki");
   const configuredImage = process.env.KB_IMAGE || DEFAULT_IMAGE;
-  const containerName = process.env.KB_CONTAINER_NAME
-    ? deriveResourceNames(targetRoot, process.env).containerName
-    : marker?.containerName || deriveResourceNames(targetRoot).containerName;
+  const containerName = deriveResourceNames(targetRoot, process.env).containerName;
   const imageState = inspectContainerImage(containerName);
 
   console.log(`Wiki-Kit status for ${targetRoot}`);
@@ -1245,9 +1245,7 @@ async function runDoctor(options) {
     const image = daemon.ok ? doctorDocker(["image", "inspect", configuredImage]) : { ok: false, output: "daemon unavailable", error: "" };
     addCheck(image.ok, "configured image is available locally", image.ok ? configuredImage : image.output || image.error, `run wiki-kit pull .`);
 
-    const containerName = process.env.KB_CONTAINER_NAME
-      ? deriveResourceNames(targetRoot, process.env).containerName
-      : markerState.marker?.containerName || deriveResourceNames(targetRoot).containerName;
+    const containerName = deriveResourceNames(targetRoot, process.env).containerName;
     const imageState = daemon.ok ? inspectContainerImage(containerName) : { running: false };
     addCheck(imageState.running, "repository container is running", containerName, "run wiki-kit start .");
 
@@ -1296,8 +1294,7 @@ async function runDoctor(options) {
   }
 }
 
-function runLifecycle(options) {
-  const { targetRoot, agentsRoot } = getInstallState(options);
+function runRunnerCommand(targetRoot, agentsRoot, command) {
   const runnerPath = path.join(agentsRoot, "run-wiki-manager.mcp.js");
   if (!fs.existsSync(runnerPath)) {
     throw new Error(`MCP runner is missing: ${runnerPath}`);
@@ -1307,22 +1304,91 @@ function runLifecycle(options) {
     cwd: targetRoot,
     env: {
       ...process.env,
-      KB_LIFECYCLE_COMMAND: options.command,
+      KB_LIFECYCLE_COMMAND: command,
     },
     encoding: "utf8",
     stdio: "pipe",
     windowsHide: true,
-    timeout: 120000,
+    // Covers the runner's 120s health wait for a cold first start.
+    timeout: 200000,
   });
   if (result.error) {
     throw result.error;
   }
   if (result.status !== 0) {
     throw new Error(
-      `${options.command} failed${result.stderr ? `: ${result.stderr.trim()}` : ""}`
+      `${command} failed${result.stderr ? `: ${result.stderr.trim()}` : ""}`
     );
   }
+}
+
+function runLifecycle(options) {
+  const { targetRoot, agentsRoot } = getInstallState(options);
+  runRunnerCommand(targetRoot, agentsRoot, options.command);
   console.log(`Wiki MCP container ${options.command} completed for ${targetRoot}`);
+}
+
+// After files are installed, make the service match them: pull the target image,
+// replace a container still running an older image, drop the old image tag, and
+// start the repository container so the one-time model download happens here
+// rather than during the first agent launch. Docker problems only warn because
+// the installed files are already usable.
+function provisionContainer(targetRoot, agentsRoot, previousImage, options) {
+  if (options.skipDocker) {
+    console.log("Skipped Docker setup; run wiki-kit pull . then wiki-kit start . when ready.");
+    return;
+  }
+  const recovery = "run wiki-kit pull . then wiki-kit start . once Docker is available";
+  const target = process.env.KB_IMAGE || DEFAULT_IMAGE;
+  const containerName = deriveResourceNames(targetRoot, process.env).containerName;
+  try {
+    const daemon = spawnSync("docker", ["info", "--format", "{{.ServerVersion}}"], {
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    if (daemon.error || daemon.status !== 0) {
+      console.warn(`Docker is not reachable; ${recovery}.`);
+      return;
+    }
+
+    const running = inspectContainerImage(containerName);
+    // Pull first so a failed download leaves a working container untouched.
+    // A cached local image is enough to continue when the registry is unreachable.
+    try {
+      runPull();
+    } catch (pullError) {
+      const cached = spawnSync("docker", ["image", "inspect", target], {
+        encoding: "utf8",
+        stdio: "pipe",
+        windowsHide: true,
+      });
+      if (cached.status !== 0) throw pullError;
+      console.warn(`${pullError.message}; continuing with the locally cached ${target}.`);
+    }
+    if (running.running && running.imageReference !== target) {
+      console.log(`Stopping ${containerName}: it runs ${running.imageReference}, expected ${target}.`);
+      runRunnerCommand(targetRoot, agentsRoot, "stop");
+    }
+    for (const oldImage of new Set([previousImage, running.imageReference])) {
+      if (!oldImage || oldImage === target) continue;
+      // Docker refuses while another repository's container still uses the image.
+      const removal = spawnSync("docker", ["rmi", oldImage], {
+        encoding: "utf8",
+        stdio: "pipe",
+        windowsHide: true,
+      });
+      console.log(
+        removal.status === 0
+          ? `Removed old image ${oldImage}`
+          : `Kept old image ${oldImage} (in use or already removed)`
+      );
+    }
+    runRunnerCommand(targetRoot, agentsRoot, "start");
+    console.log(`Wiki MCP container started for ${targetRoot}`);
+  } catch (error) {
+    console.warn(`Docker setup incomplete: ${error.message}. ${recovery}.`);
+  }
 }
 
 function runPull() {
@@ -1375,6 +1441,7 @@ function run(options) {
   );
 
   const agentsRoot = path.join(targetRoot, options.agentsDir);
+  const previousImage = describeMarker(agentsRoot).marker?.defaultImage || null;
   const removedLegacyAssets = copyWikiKitPayload(agentsRoot, options);
   const rootAssets = copyRootPayload(targetRoot, options);
 
@@ -1404,6 +1471,7 @@ function run(options) {
   ) {
     console.log("No root assets copied; existing files were left in place.");
   }
+  provisionContainer(targetRoot, agentsRoot, previousImage, options);
 }
 
 Promise.resolve()

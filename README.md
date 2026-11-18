@@ -4,30 +4,29 @@ A repo-local RAG wiki for AI agents: a per-repository MCP knowledge service
 (governed search / read / write of Markdown wiki notes) plus an installer that
 wires it into your agent tooling. Docker is required to run the service.
 
-## Quick start (recommended)
-
-Pre-pull the service image before your first agent session to avoid cold-start
-delays:
-
-```bash
-docker pull ihorleleka/project-rag-wiki:latest
-```
-
 ## Install
 
-Run in your repository root:
+Run in your repository root with Docker running:
 
 ```bash
 npx github:ihorleleka/Local-Rag-Wiki install .
 ```
+
+Besides the files below, `install` and `update` set up the service: they pull the
+pinned image, stop a repository container that still runs an older image, remove
+the superseded image tag (kept if another repository's container still uses it),
+and start the container so the one-time embedding-model download (~80 MB) happens
+here instead of during your first agent launch. If Docker is unavailable the files
+are still installed and a warning tells you to run `wiki-kit pull .` and
+`wiki-kit start .` later; `--skip-docker` (or `WIKI_KIT_SKIP_DOCKER=1`) skips this
+step.
 
 This scaffolds the managed `.agents/` runner, the `AGENTS.md` policy section,
 DSH workspace assets (`.dsh/mcp.servers.yml` and its scoped MCP bridge), Claude
 Code, Codex, VS Code, and OpenCode, plus a `wiki/` folder. The DSH bridge stays
 under `.dsh/`; it is never installed as a repository-root
 `.dsh-mcp-client.js`. These integrations are additive. The MCP service starts
-per repository when a configured agent client connects. Pre-pulling the image
-(above) is recommended before running the agent in a fresh environment.
+per repository and keeps running independently of agent clients.
 
 ## Claude Code
 
@@ -39,8 +38,10 @@ The installer delivers Claude Code's project-native integration surfaces:
   the shared `.agents/skills/wiki` source. Use `/wiki` in Claude Code (`$wiki` is
   the invocation used by other clients). Updates refresh this managed skill even
   without `--force`, while preserving other skill directories.
-- `CLAUDE.md` receives a bounded, managed wiki-policy section; existing project
-  instructions outside that section are preserved.
+- `CLAUDE.md` receives a bounded, managed section containing only an
+  `@AGENTS.md` import, so Claude Code reads the same wiki policy and engineering
+  baseline as other clients; existing project instructions outside that section
+  are preserved.
 
 The installer does not add MCP definitions to `.claude/settings.local.json`.
 Older installations may still contain an obsolete `mcpServers.wiki-manager`
@@ -50,6 +51,22 @@ No server approval or tool permission is granted automatically: accept the
 workspace/project MCP trust prompts as appropriate, then check `/mcp` and confirm
 `/wiki` is listed in a fresh Claude session. Docker must be available for MCP
 startup. `--skip-root` omits all these Claude integration surfaces.
+
+Claude Code waits 30 seconds for an MCP server to start by default
+(`MCP_TIMEOUT`). After `install` or `update` the container is already warm and
+attaching takes seconds. A cold start (for example after `--skip-docker`, or the
+first repository on a machine without the model cached) can take longer: the
+runner allows up to 120 seconds. If `wiki-manager` fails on that launch, run
+`wiki-kit start .` once, or start Claude Code with `MCP_TIMEOUT=150000`. Claude
+Code only reads `.mcp.json` from the
+folder it is started in: open the repository root, not a parent folder that
+contains several repositories, or the `wiki_*` tools will be missing (the `/wiki`
+skill still works from local files).
+
+If you move or re-clone a repository, the container name changes with the path.
+The runner replaces a container whose wiki mount points elsewhere, but a container
+from the old path keeps running; remove it with `docker rm -f <name>` (see
+`docker ps`) and drop its volume with `docker volume rm <name>-kb-data`.
 
 The `.agents/plugins/marketplace.json` catalog is for other agent tooling, not a
 Claude Code marketplace. This integration uses project skills and project MCP
@@ -127,7 +144,9 @@ through its MCP configuration without repository prompt-history hooks. See
 
 ## Update
 
-After install, refresh the managed files from inside the repo — no npx needed:
+After install, refresh the managed files and the service from inside the repo — no
+npx needed. This also pulls the pinned image, replaces an outdated container, and
+starts it (see Install):
 
 ```bash
 .agents\update-wiki-kit.cmd --force

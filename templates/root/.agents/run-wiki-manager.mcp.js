@@ -70,9 +70,11 @@ const FIND_FREE_PORT =
 const REQUEST_TIMEOUT_MS = 2500;
 const READY_TIMEOUT_MS = 8000;
 // Max time to wait for the container to report healthy on first start (ms).
+// The image is pulled at install time; this covers the one-time ~80 MB
+// embedding-model download plus index build on a slow connection.
 const HEALTH_TIMEOUT_MS = parseTimeoutMs(
   process.env.KB_HEALTH_TIMEOUT_MS,
-  70000,
+  120000,
   "KB_HEALTH_TIMEOUT_MS"
 );
 // Docker Desktop can expose the CLI before its Linux engine is ready. Wait a
@@ -294,17 +296,36 @@ async function getContainerState(container) {
     const output = await runCapture("docker", ["inspect", container], { echoStderr: false });
     const [details] = JSON.parse(output);
     const binding = details?.NetworkSettings?.Ports?.["1111/tcp"]?.[0];
+    const wikiMount = details?.Mounts?.find((mount) => mount.Destination === KB_WIKI_ROOT);
     return {
       running: Boolean(details?.State?.Running),
       port: binding?.HostPort || null,
       hostIp: binding?.HostIp || null,
+      wikiSource: wikiMount?.Source || null,
     };
   } catch (error) {
     if (isMissingContainerError(error)) {
-      return { running: false, port: null, hostIp: null };
+      return { running: false, port: null, hostIp: null, wikiSource: null };
     }
     throw error;
   }
+}
+
+function normalizeMountPath(value) {
+  // Docker Desktop reports Windows bind sources in its Linux VM form,
+  // e.g. /run/desktop/mnt/host/c/repo, for the same directory as C:\repo.
+  const desktop = String(value).replace(/\\/g, "/").match(/^\/run\/desktop\/mnt\/host\/([a-zA-Z])(\/.*)?$/);
+  if (desktop) {
+    return `${desktop[1].toLowerCase()}:${(desktop[2] || "").replace(/\/+$/, "")}`.toLowerCase();
+  }
+  const normalized = path.resolve(value).replace(/\\/g, "/").replace(/\/+$/, "");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+// A container keeps its original bind mounts. If the repository was moved or
+// re-created, a healthy container can still serve the old (now missing) path.
+function wikiMountMatches(wikiSource, wikiPath) {
+  return !wikiSource || normalizeMountPath(wikiSource) === normalizeMountPath(wikiPath);
 }
 
 function parseTimeoutMs(raw, fallback, name) {
@@ -322,6 +343,14 @@ async function attachToRunningContainer(name) {
     return null;
   }
   if (existingContainer.hostIp !== KB_BIND_ADDRESS) {
+    return null;
+  }
+  const wikiPath = path.join(ROOT, "wiki");
+  if (!wikiMountMatches(existingContainer.wikiSource, wikiPath)) {
+    // Returning null makes the caller replace the container with the current mounts.
+    console.error(
+      `KB container "${name}" mounts ${existingContainer.wikiSource} instead of ${wikiPath}; recreating it.`
+    );
     return null;
   }
 
@@ -916,6 +945,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  wikiMountMatches,
   canonicalRepositoryRoot,
   deriveResourceNames,
   createMcpMessageHandler,

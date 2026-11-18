@@ -32,7 +32,7 @@ default. The update owns only the managed wiki policy section and the
 
 The MCP entrypoint is `run-wiki-manager.mcp.js`. Repository-level agent policy
 and editor MCP configuration live in the repository root. Claude Code uses root
-`.mcp.json`, a managed policy section in `CLAUDE.md`, and `/wiki` discovered from
+`.mcp.json`, a managed `@AGENTS.md` import in `CLAUDE.md`, and `/wiki` discovered from
 `.claude/skills/wiki/`. The Claude skill and authoring reference are generated
 from this directory's shared skill source on every update. Other Claude skills
 and `.claude/settings.local.json` remain user-owned; the installer does not grant
@@ -61,7 +61,8 @@ The managed runner pins a deterministic Project-Rag-Wiki image digest. Use
 `wiki-kit status .` command reports the configured and running image plus its
 compatibility state. `KB_IMAGE` is an explicit override and is reported as one.
 
-Generated Codex configuration allows 75 seconds for cold MCP startup and 120
-seconds for tool calls. OpenCode receives its supported 75-second MCP discovery
-timeout. The live maintainer verifier uses empty KB and model-cache volumes to
+The runner waits up to 120 seconds for a cold container to become healthy; the
+one-time embedding-model download dominates. Generated Codex configuration
+allows 150 seconds for cold MCP startup and 120 seconds for tool calls.
+OpenCode receives its supported 150-second MCP discovery timeout. The live maintainer verifier uses empty KB and model-cache volumes to
 exercise cold initialization.

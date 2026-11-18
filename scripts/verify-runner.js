@@ -85,6 +85,7 @@ function prepareInstall() {
     "install",
     SCRATCH_ROOT,
     "--force",
+    "--skip-docker",
   ]);
 }
 
@@ -393,9 +394,9 @@ async function main() {
     const initializationStarted = Date.now();
     await Promise.all([clientA.initialize(), clientB.initialize()]);
     const coldInitializationSeconds = (Date.now() - initializationStarted) / 1000;
-    if (coldInitializationSeconds >= 75) {
+    if (coldInitializationSeconds >= 150) {
       fail(
-        `Cold initialization took ${coldInitializationSeconds.toFixed(2)}s, exceeding the generated 75s timeout`
+        `Cold initialization took ${coldInitializationSeconds.toFixed(2)}s, exceeding the generated 150s timeout`
       );
     }
 
