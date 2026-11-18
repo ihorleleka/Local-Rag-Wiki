@@ -239,7 +239,15 @@ async function getReadyHealth(url) {
         if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
         try {
           const health = JSON.parse(body);
+          // kb-service binds its port first and builds the index afterwards, so
+          // the MCP endpoint lists tools while /health still reports "starting"
+          // (HTTP 200). Attach at that point: the host sees the tools within
+          // seconds, and tool calls wait for the index inside the service. A
+          // failed build is "degraded" (HTTP 503) and is rejected above. Older
+          // images only bind after the build, so they never report "starting".
+          const mcpRunning = health.mcp === "running";
           if (health.status === "ok" && health.service === "ready") return resolve();
+          if (health.status === "starting" && mcpRunning) return resolve();
           reject(new Error(`service status ${health.status || "unknown"}`));
         } catch {
           reject(new Error("invalid health response"));

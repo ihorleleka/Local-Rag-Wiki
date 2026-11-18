@@ -21,6 +21,16 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=deps /opt/venv /opt/venv
+
+# Bake the ONNX MiniLM weights into the image. The service loads the model
+# before it binds its port, so a first start on a machine without the model
+# cached would otherwise leave the MCP endpoint unreachable while ~80 MB
+# downloads. The named cache volume mounted at this path is seeded from these
+# files when it is first created. Keep this above the per-build ARG/LABEL
+# lines so the layer stays cacheable until the dependencies change.
+RUN python -c "from chromadb.utils import embedding_functions as e; e.ONNXMiniLM_L6_V2()._download_model_if_not_exists()"
+
 ARG VCS_REF=unknown
 ARG BUILD_DATE=unknown
 ARG VERSION=0.0.0
@@ -28,7 +38,7 @@ ARG VERSION=0.0.0
 # them as build args, then verifies the labels match the values inside the image.
 # The defaults here are a local-build fallback only.
 ARG INDEX_SCHEMA_VERSION=7
-ARG MCP_TOOL_CONTRACT_VERSION=7
+ARG MCP_TOOL_CONTRACT_VERSION=8
 LABEL org.opencontainers.image.title="kb-service" \
       org.opencontainers.image.description="Repository-scoped MCP knowledge service for Markdown wiki content." \
       org.opencontainers.image.version="${VERSION}" \
@@ -38,7 +48,6 @@ LABEL org.opencontainers.image.title="kb-service" \
       io.github.ihorleleka.project-rag-wiki.index-schema-version="${INDEX_SCHEMA_VERSION}" \
       io.github.ihorleleka.project-rag-wiki.mcp-tool-contract-version="${MCP_TOOL_CONTRACT_VERSION}"
 
-COPY --from=deps /opt/venv /opt/venv
 COPY . /app/.knowledge-service
 
 RUN --mount=type=cache,target=/root/.cache/pip \

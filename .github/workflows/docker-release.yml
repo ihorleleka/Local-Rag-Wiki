@@ -48,16 +48,28 @@ jobs:
           echo "index_schema_version=${SCHEMA}" >> "${GITHUB_OUTPUT}"
           echo "mcp_tool_contract_version=${TOOL}" >> "${GITHUB_OUTPUT}"
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # load: true keeps the image in the local daemon: the verification steps
+      # below run it, and the push step tags and pushes that exact image.
+      # The GitHub Actions cache reuses the dependency and embedding-model
+      # layers until pyproject.toml or the Dockerfile changes.
       - name: Build the release candidate
-        run: |
-          docker build \
-            --build-arg VERSION="${{ steps.version.outputs.version }}" \
-            --build-arg VCS_REF="${GITHUB_SHA}" \
-            --build-arg BUILD_DATE="${{ steps.metadata.outputs.build_date }}" \
-            --build-arg INDEX_SCHEMA_VERSION="${{ steps.contract.outputs.index_schema_version }}" \
-            --build-arg MCP_TOOL_CONTRACT_VERSION="${{ steps.contract.outputs.mcp_tool_contract_version }}" \
-            --tag "${CANDIDATE_IMAGE}" \
-            ./kb-service
+        uses: docker/build-push-action@v6
+        with:
+          context: ./kb-service
+          load: true
+          push: false
+          tags: ${{ env.CANDIDATE_IMAGE }}
+          cache-from: type=gha,scope=kb-service
+          cache-to: type=gha,scope=kb-service,mode=max
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.metadata.outputs.build_date }}
+            INDEX_SCHEMA_VERSION=${{ steps.contract.outputs.index_schema_version }}
+            MCP_TOOL_CONTRACT_VERSION=${{ steps.contract.outputs.mcp_tool_contract_version }}
 
       - name: Verify candidate metadata
         run: |

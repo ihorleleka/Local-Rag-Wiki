@@ -8,22 +8,19 @@ def main() -> None:
     disable_crash_dumps()
 
     from kb_service.settings import Settings
-    from kb_service.vector_store_safety import (
-        ensure_vector_store_is_safe,
-        probe_vector_store,
-    )
+    from kb_service.vector_store_safety import probe_vector_store
 
     settings = Settings.load()
     if "--probe-vector-store" in sys.argv:
         probe_vector_store(settings)
         return
 
-    ensure_vector_store_is_safe(settings)
-
     from kb_service.app import create_app
     import uvicorn
 
-    uvicorn.run(create_app(), host=settings.host, port=settings.port)
+    # The vector-store probe and index build run after the port is bound (see
+    # create_app), so MCP clients can connect and list tools immediately.
+    uvicorn.run(create_app(defer_index_build=True), host=settings.host, port=settings.port)
 
 
 if __name__ == "__main__":

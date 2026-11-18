@@ -14,8 +14,10 @@ from fastapi.responses import JSONResponse
 from fastmcp import FastMCP
 
 from .contract import INDEX_SCHEMA_VERSION, MCP_TOOL_CONTRACT_VERSION
+from .deferred_index import DeferredKnowledgeIndex
 from .indexer import KnowledgeIndex
 from .settings import Settings
+from .vector_store_safety import ensure_vector_store_is_safe
 
 
 MCP_INSTRUCTIONS = (
@@ -425,9 +427,24 @@ def compact_context_packet(packet: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def create_app():
+def create_app(*, defer_index_build: bool = False):
+    """Create the FastAPI app.
+
+    With ``defer_index_build`` the vector-store probe, Chroma and the embedding
+    model are loaded on a background thread started by the lifespan, so the MCP
+    endpoint binds and lists its tools immediately. Calls that need the index
+    wait for it; a failed build is reported by ``/health`` as degraded.
+    """
     settings = Settings.load()
-    index = KnowledgeIndex(settings)
+    if defer_index_build:
+        def build_index():
+            # Probe and, if needed, quarantine a corrupt store before opening it.
+            ensure_vector_store_is_safe(settings)
+            return KnowledgeIndex(settings)
+
+        index = DeferredKnowledgeIndex(build_index)
+    else:
+        index = KnowledgeIndex(settings)
     watcher_task = None
     startup_task = None
     mcp_runtime: dict[str, bool] = {"running": False}
@@ -438,6 +455,12 @@ def create_app():
     mcp = FastMCP("repo-knowledge", instructions=MCP_INSTRUCTIONS)
 
     async def watcher_loop():
+        if defer_index_build:
+            try:
+                await index.wait_ready()
+            except Exception:
+                # The startup reindex reports the failure through /health.
+                return
         while True:
             await asyncio.sleep(settings.watch_interval_seconds)
             if not hasattr(index, "wiki_signature"):
@@ -456,7 +479,8 @@ def create_app():
 
     async def startup_reindex_loop():
         result = await coordinator.request_reindex("startup")
-        if hasattr(index, "wiki_signature"):
+        # hasattr() on a still-building index would block the event loop.
+        if (not defer_index_build or index.is_ready) and hasattr(index, "wiki_signature"):
             try:
                 watch_state["signature"] = await asyncio.to_thread(index.wiki_signature)
             except Exception:
@@ -468,6 +492,8 @@ def create_app():
         nonlocal watcher_task, startup_task
         async with mcp_app.lifespan(app):
             mcp_runtime["running"] = True
+            if defer_index_build:
+                index.start()
             coordinator.start()
             # Indexing is best-effort background work; MCP becomes available
             # immediately instead of waiting on startup scans or embeddings.

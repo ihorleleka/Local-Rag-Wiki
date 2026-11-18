@@ -17,6 +17,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from kb_service.deferred_index import IndexUnavailableError  # noqa: E402
+
 
 @dataclass
 class DummySearchResult:
@@ -263,6 +265,106 @@ class AppBehaviorTests(unittest.TestCase):
                 self.assertEqual(health["mcp"], "running")
 
         asyncio.run(run_health())
+
+    def _deferred_settings(self):
+        return types.SimpleNamespace(
+            wiki_root=Path("wiki"),
+            repository_root=Path("."),
+            kb_root=Path("kb"),
+            host="0.0.0.0",
+            port=7331,
+            mcp_path="/mcp/",
+            health_path="/health",
+            embedding_model="all-MiniLM-L6-v2",
+            chunk_size=500,
+            chunk_overlap=150,
+            top_k=8,
+            merge_adjacent_window=1,
+            staleness_days=90,
+            watch_interval_seconds=0,
+            startup_reindex_timeout_seconds=3,
+        )
+
+    def _create_deferred_app(self, index_class, probe):
+        """Create a deferred app; index_class/probe stay patched until restored."""
+        originals = (self.app_module.KnowledgeIndex, self.app_module.ensure_vector_store_is_safe)
+        self.app_module.Settings.load = staticmethod(self._deferred_settings)
+        self.app_module.KnowledgeIndex = index_class
+        self.app_module.ensure_vector_store_is_safe = probe
+
+        def restore():
+            self.app_module.KnowledgeIndex, self.app_module.ensure_vector_store_is_safe = originals
+
+        self.addCleanup(restore)
+        return self.app_module.create_app(defer_index_build=True)
+
+    def test_deferred_build_serves_mcp_and_health_before_index_exists(self) -> None:
+        release_build = threading.Event()
+        build_started = threading.Event()
+        probes = []
+
+        class SlowBuiltIndex(DummyKnowledgeIndex):
+            def __init__(self, settings):
+                build_started.set()
+                release_build.wait(5)
+                super().__init__(settings)
+
+        app = self._create_deferred_app(SlowBuiltIndex, lambda settings: probes.append(settings))
+        # create_app returns without probing or building anything.
+        self.assertEqual(probes, [])
+        self.assertFalse(build_started.is_set())
+        self.assertIn("wiki_search", dict(DummyMCP.last_instance.tools))
+
+        async def run():
+            async with app.lifespan(app):
+                health = await asyncio.wait_for(app.routes[("GET", "/health")](), timeout=1)
+                self.assertEqual(health["status"], "starting")
+                self.assertEqual(health["mcp"], "running")
+                for _ in range(200):
+                    if build_started.is_set():
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertTrue(build_started.is_set(), "lifespan starts the build in the background")
+                self.assertFalse(release_build.is_set())
+                self.assertEqual(
+                    (await app.routes[("GET", "/health")]())["status"], "starting",
+                    "MCP stays up while the index is still being built",
+                )
+                release_build.set()
+                for _ in range(300):
+                    health = await app.routes[("GET", "/health")]()
+                    if health["status"] == "ok":
+                        break
+                    await asyncio.sleep(0.02)
+                self.assertEqual(health["status"], "ok")
+
+        asyncio.run(run())
+        self.assertEqual(len(probes), 1, "the vector-store probe runs once, inside the build")
+
+    def test_deferred_build_failure_reports_degraded_and_clear_tool_error(self) -> None:
+        class BrokenIndex:
+            def __init__(self, settings):
+                raise RuntimeError("model download failed")
+
+        app = self._create_deferred_app(BrokenIndex, lambda settings: None)
+        search = dict(DummyMCP.last_instance.tools)["wiki_search"]
+
+        async def run():
+            async with app.lifespan(app):
+                for _ in range(300):
+                    health = await app.routes[("GET", "/health")]()
+                    if not isinstance(health, dict):
+                        return health
+                    await asyncio.sleep(0.02)
+                self.fail(f"health never became degraded: {health}")
+
+        health = asyncio.run(run())
+        self.assertEqual(health.status_code, 503)
+        self.assertEqual(health.content["status"], "degraded")
+        self.assertIn("model download failed", health.content["last_error"])
+        with self.assertRaises(IndexUnavailableError) as raised:
+            search("anything")
+        self.assertIn("model download failed", str(raised.exception))
 
     def test_health_reports_starting_during_long_initial_index(self) -> None:
         release_reindex = threading.Event()

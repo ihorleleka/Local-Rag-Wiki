@@ -53,11 +53,13 @@ workspace/project MCP trust prompts as appropriate, then check `/mcp` and confir
 startup. `--skip-root` omits all these Claude integration surfaces.
 
 Claude Code waits 30 seconds for an MCP server to start by default
-(`MCP_TIMEOUT`). After `install` or `update` the container is already warm and
-attaching takes seconds. A cold start (for example after `--skip-docker`, or the
-first repository on a machine without the model cached) can take longer: the
-runner allows up to 120 seconds. If `wiki-manager` fails on that launch, run
-`wiki-kit start .` once, or start Claude Code with `MCP_TIMEOUT=150000`. Claude
+(`MCP_TIMEOUT`). The service binds its MCP port first and builds the index in the
+background, so `wiki-manager` connects and lists its tools within a few seconds
+even on a cold start; tool calls wait for the index only when they need it. A
+start that also has to pull the image or wait for Docker Desktop can still take
+longer: the runner allows up to 120 seconds. If `wiki-manager` fails on that
+launch, run `wiki-kit start .` once, or start Claude Code with
+`MCP_TIMEOUT=150000`. Claude
 Code only reads `.mcp.json` from the
 folder it is started in: open the repository root, not a parent folder that
 contains several repositories, or the `wiki_*` tools will be missing (the `/wiki`
