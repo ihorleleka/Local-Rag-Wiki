@@ -308,6 +308,172 @@ test("expired initialized notification renews once without duplicate or output",
   });
 });
 
+// --- Lazy initialization: static manifest answers, queued calls, deadline, retry ---
+const manifestModule = require("../templates/root/.agents/wiki-manager-manifest.js");
+const { createWarmingHandler } = require("../templates/root/.agents/run-wiki-manager.mcp.js");
+
+async function withWarming(test, { warmupTimeoutMs = 2000 } = {}) {
+  const requests = [];
+  const output = [];
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.setEncoding("utf8");
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => {
+      const message = JSON.parse(body);
+      requests.push(message);
+      if (message.method === "initialize") initialized(res, message, "warm-session");
+      else if (message.method === "notifications/initialized") { res.writeHead(202); res.end(); }
+      else reply(res, message, { served: message.method, id: message.id });
+    });
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const url = `http://127.0.0.1:${server.address().port}/mcp/`;
+  const gate = { calls: 0, resolve: null, reject: null };
+  const warmUp = () => {
+    gate.calls += 1;
+    return new Promise((resolve, reject) => {
+      gate.resolve = () => resolve(url);
+      gate.reject = error => reject(error);
+    });
+  };
+  const handler = createWarmingHandler(warmUp, text => output.push(JSON.parse(text)), {
+    warmupTimeoutMs, bridgeOptions: { timeoutMs: 500 },
+  });
+  const until = async (predicate, ms = 2000) => {
+    const started = Date.now();
+    while (!predicate()) {
+      if (Date.now() - started > ms) throw new Error("condition not met in time");
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+  };
+  try {
+    await test({ handler, output, requests, gate, until, send: message => handler.handle(JSON.stringify(message)) });
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+}
+const toolCall = (id, name = "wiki_list", args = {}) => ({ ...rpc(id, "tools/call"), params: { name, arguments: args } });
+
+test("lazy init: initialize, ping and tools/list answer before the container is ready", async () => {
+  await withWarming(async ({ handler, output, requests, send, gate }) => {
+    handler.begin();
+    await send(initialize);
+    await send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    await send(rpc("ping-1", "ping"));
+    await send(rpc("tools", "tools/list"));
+    assert.equal(gate.calls, 1, "warm-up started exactly once");
+    assert.equal(requests.length, 0, "nothing reached the service yet");
+    assert.equal(output[0].id, "client-initialize");
+    assert.equal(output[0].result.serverInfo.name, manifestModule.SERVER_INFO.name);
+    assert.ok(output[0].result.capabilities.tools);
+    assert.equal(output[0].result.protocolVersion, "2025-03-26");
+    assert.deepEqual(output[1], { jsonrpc: "2.0", id: "ping-1", result: {} });
+    assert.deepEqual(output[2].result.tools.map(t => t.name), manifestModule.TOOLS.map(t => t.name));
+    assert.ok(output[2].result.tools.every(t => t.inputSchema?.type === "object"));
+  });
+});
+
+test("lazy init: a tool call queues until ready, then replays the handshake once", async () => {
+  await withWarming(async ({ handler, output, requests, send, gate, until }) => {
+    handler.begin();
+    await send(initialize);
+    await send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    output.length = 0;
+    const pending = send(toolCall("queued"));
+    await pending;
+    assert.equal(output.length, 0, "no answer while warming");
+    gate.resolve();
+    await until(() => output.length === 1);
+    assert.deepEqual(output, [{ jsonrpc: "2.0", id: "queued", result: { served: "tools/call", id: "queued" } }]);
+    assert.deepEqual(requests.map(r => r.method), ["initialize", "notifications/initialized", "tools/call"]);
+    assert.equal(requests.filter(r => r.method === "initialize").length, 1);
+    await send(toolCall("direct"));
+    await until(() => output.length === 2);
+    assert.equal(output[1].id, "direct");
+    assert.equal(handler.getPhase(), "ready");
+  });
+});
+
+test("lazy init: past the deadline a call gets a clear warming-up error and a later call succeeds", async () => {
+  await withWarming(async ({ handler, output, send, gate, until }) => {
+    handler.begin();
+    await send(initialize);
+    await send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    output.length = 0;
+    await send(toolCall("slow"));
+    await until(() => output.length === 1);
+    assert.equal(output[0].id, "slow");
+    assert.equal(output[0].result.isError, true, "tool errors are reported as tool results");
+    const text = output[0].result.content[0].text;
+    assert.match(text, /warming up/);
+    assert.match(text, /do not fall back to local-file mode silently/);
+    assert.match(text, /KB_LIFECYCLE_COMMAND=start node /);
+    assert.match(text, /new session/);
+    gate.resolve();
+    await until(() => handler.getPhase() === "ready");
+    output.length = 0;
+    await send(toolCall("after"));
+    await until(() => output.length === 1);
+    assert.equal(output[0].result.served, "tools/call");
+  }, { warmupTimeoutMs: 80 });
+});
+
+test("lazy init: a failed warm-up reports recovery guidance and the next call retries", async () => {
+  await withWarming(async ({ handler, output, send, gate, until }) => {
+    handler.begin();
+    await send(initialize);
+    await send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    output.length = 0;
+    await send(toolCall("first"));
+    gate.reject(new Error("Docker Desktop's Linux engine is unavailable."));
+    await until(() => output.length === 1);
+    const text = output[0].result.content[0].text;
+    assert.match(text, /could not start: Docker Desktop's Linux engine is unavailable/);
+    assert.match(text, /npx github:ihorleleka\/Local-Rag-Wiki start \./);
+    output.length = 0;
+    await send(toolCall("retry"));
+    await until(() => gate.calls === 2);
+    assert.equal(gate.calls, 2, "the next call starts a fresh warm-up");
+    gate.resolve();
+    await until(() => output.length === 1);
+    assert.equal(output[0].id, "retry");
+    assert.equal(output[0].result.served, "tools/call");
+  });
+});
+
+test("lazy init: a service that rejects the replayed initialize counts as a failed warm-up", async () => {
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", chunk => { body += chunk; });
+    req.on("end", () => {
+      const message = JSON.parse(body);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: message.id, error: { code: -32603, message: "nope" } }));
+    });
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  const output = [];
+  const handler = createWarmingHandler(
+    async () => `http://127.0.0.1:${server.address().port}/mcp/`,
+    text => output.push(JSON.parse(text)),
+    { warmupTimeoutMs: 1000, bridgeOptions: { timeoutMs: 500 } },
+  );
+  try {
+    await handler.handle(JSON.stringify(initialize));
+    await handler.handle(JSON.stringify(toolCall("x")));
+    await handler.idle();
+    const last = output[output.length - 1];
+    assert.equal(last.id, "x");
+    assert.match(last.result.content[0].text, /service rejected initialize/);
+    assert.equal(handler.getPhase(), "failed");
+  } finally {
+    server.closeAllConnections();
+    await new Promise(resolve => server.close(resolve));
+  }
+});
+
 (async () => {
   let failed = 0;
   const started = performance.now();

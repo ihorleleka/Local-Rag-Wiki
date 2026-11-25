@@ -35,6 +35,9 @@ class Settings:
     reranker_enabled: bool
     reranker_model_path: str
     reranker_top_n: int
+    # Age warnings matter only for kinds whose silent aging misleads agents.
+    staleness_kinds: frozenset[str] = frozenset({"rule", "decision"})
+    pending_max_days: int = 7
 
     @staticmethod
     def load() -> "Settings":
@@ -78,4 +81,10 @@ class Settings:
             reranker_enabled=os.getenv("KB_RERANKER", "0").strip().lower() in {"1", "true", "yes", "on"},
             reranker_model_path=os.getenv("KB_RERANKER_MODEL_PATH", "").strip(),
             reranker_top_n=max(1, int(os.getenv("KB_RERANKER_TOP_N", "20"))),
+            staleness_kinds=frozenset(
+                kind.strip().lower()
+                for kind in os.getenv("KB_STALENESS_KINDS", "rule,decision").split(",")
+                if kind.strip()
+            ),
+            pending_max_days=max(1, int(os.getenv("KB_PENDING_MAX_DAYS", "7"))),
         )

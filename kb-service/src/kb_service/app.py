@@ -741,7 +741,7 @@ def create_app(*, defer_index_build: bool = False):
 
     @mcp.tool()
     async def wiki_edit(path: str, old_text: str, new_text: str):
-        """Atomically replace one exact, unique text fragment in an existing Markdown note. Prefer this for small updates instead of resending the full note with wiki_write. Copy old_text (non-empty) exactly from wiki_read, including whitespace and line endings; new_text may be empty to delete it. Missing notes, missing text, or multiple matches return a conflict without writing; re-read and retry with more context. Coordinate one writer per note. Schedules targeted reindexing without delaying the response."""
+        """Atomically replace one exact, unique text fragment in an existing Markdown note. Prefer this for small updates instead of resending the full note with wiki_write. Copy old_text (non-empty) exactly from wiki_read, including whitespace; CRLF/LF line-ending differences are tolerated and the note keeps its own style; new_text may be empty to delete it. Missing notes, missing text, or multiple matches return a conflict without writing; re-read and retry with more context. Coordinate one writer per note. Schedules targeted reindexing without delaying the response."""
         result = await asyncio.to_thread(index.edit_doc, path, old_text, new_text)
         if result["status"] == "ok":
             index_result = await coordinator.request_reindex(

@@ -1,68 +1,18 @@
 # Wiki Kit
 
-This directory is the managed local runner payload for the repository wiki.
+Managed files for this repository's project wiki. They are replaced on update;
+don't edit them by hand. Your own skills under `skills/` are kept.
 
-Use the wrapper here to refresh the committed wiki-kit files:
-
-```bash
-.\update-wiki-kit.cmd --force
-```
-
-On macOS or Linux:
+Update from the repository root:
 
 ```bash
-sh ./update-wiki-kit.sh --force
+.agents\update-wiki-kit.cmd --force      # Windows
+sh .agents/update-wiki-kit.sh --force    # macOS / Linux
 ```
 
-The wrappers resolve the package source from `.wiki-kit-install.json` so updates
-keep using the source that performed the install. Set `WIKI_KIT_PACKAGE` only to
-override that source intentionally.
+The update uses the same package source as the original install (recorded in
+`.wiki-kit-install.json`); set `WIKI_KIT_PACKAGE` only to change it.
 
-The update preserves user-added skill directories under `skills/`, replaces the
-managed `skills/wiki` skill, and removes old split wiki-kit skills from earlier
-versions.
-
-The install includes integration metadata in `integrations/` and plugin catalog
-metadata in `plugins/`. Project recall is provided by the governed wiki MCP
-service rather than local prompt-history hooks.
-
-Repository `AGENTS.md` instructions and editor MCP configuration are merged by
-default. The update owns only the managed wiki policy section and the
-`wiki-manager` MCP server entries.
-
-The MCP entrypoint is `run-wiki-manager.mcp.js`. Repository-level agent policy
-and editor MCP configuration live in the repository root. Claude Code uses root
-`.mcp.json`, a managed `@AGENTS.md` import in `CLAUDE.md`, and `/wiki` discovered from
-`.claude/skills/wiki/`. The Claude skill and authoring reference are generated
-from this directory's shared skill source on every update. Other Claude skills
-and `.claude/settings.local.json` remain user-owned; the installer does not grant
-MCP approvals or tool permissions. The `plugins/` catalog is not a Claude Code
-marketplace, and this project-native integration requires no Claude plugin.
-
-The MCP endpoint binds to `127.0.0.1` by default because it has no built-in
-authentication and includes write tools. Intentional network exposure requires
-both `KB_BIND_ADDRESS` and `KB_ALLOW_NETWORK_EXPOSURE=1`; protect such exposure
-with an external access-control boundary.
-
-Default container and KB volume names include a stable hash of the canonical
-repository root, so repositories with identical folder names remain isolated.
-The `hf-cache` model volume stays shared. To migrate an older basename-only
-index, temporarily set `KB_VOLUME=<old-repository-name>-kb-data`; explicit
-`KB_CONTAINER_NAME`, `KB_VOLUME`, and `HF_CACHE_VOLUME` values take precedence.
-
-The repository container persists independently of individual MCP clients.
-Closing one client does not stop service for another. Use `wiki-kit start .`,
-`wiki-kit stop .`, or `wiki-kit restart .` for explicit lifecycle control.
-Concurrent clients attach to the same healthy repository container; stale or
-stopped containers are recovered on the next start.
-
-The managed runner pins a deterministic Project-Rag-Wiki image digest. Use
-`wiki-kit pull .` to fetch it deliberately, then `wiki-kit restart .`. The
-`wiki-kit status .` command reports the configured and running image plus its
-compatibility state. `KB_IMAGE` is an explicit override and is reported as one.
-
-The runner waits up to 120 seconds for a cold container to become healthy; the
-one-time embedding-model download dominates. Generated Codex configuration
-allows 150 seconds for cold MCP startup and 120 seconds for tool calls.
-OpenCode receives its supported 150-second MCP discovery timeout. The live maintainer verifier uses empty KB and model-cache volumes to
-exercise cold initialization.
+If the `wiki_*` tools are missing in an agent session, see
+`skills/wiki/references/recovery.md`. Usage, troubleshooting, and configuration:
+https://github.com/ihorleleka/Local-Rag-Wiki

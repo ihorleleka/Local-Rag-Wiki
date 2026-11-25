@@ -16,6 +16,9 @@ LINE_ENDING_WARNING_MARKERS = (
     "lf will be replaced by crlf",
     "crlf will be replaced by lf",
 )
+# Version of the anchor identity format. Snapshots recorded under another scheme
+# are compared by existence only, so an upgrade does not flag every anchor.
+IDENTITY_SCHEME = 2
 KNOWN_FILE_SUFFIXES = {
     ".cs", ".csproj", ".config", ".css", ".html", ".js", ".json", ".jsonc",
     ".md", ".mjs", ".props", ".ps1", ".py", ".razor", ".sh", ".sln", ".slnx",
@@ -73,8 +76,16 @@ class EvidenceReport:
 
     @property
     def snapshot(self) -> dict[str, dict[str, Any]]:
+        """Stable per-anchor state used to detect evidence drift between indexings.
+
+        The transient working-tree state is excluded: staging or committing an
+        unchanged file must not register as a change.
+        """
         return {
-            f"{anchor.kind}:{anchor.target}#{anchor.locator}": anchor.snapshot()
+            f"{anchor.kind}:{anchor.target}#{anchor.locator}": {
+                **{key: value for key, value in anchor.snapshot().items() if key != "working_tree_state"},
+                "identity_scheme": IDENTITY_SCHEME,
+            }
             for anchor in self.anchors
         }
 
@@ -86,6 +97,15 @@ class EvidenceReport:
             "changed_count": len(self.changed_targets),
             "excessive_inventory": self.excessive_inventory,
         }
+
+
+def _anchor_changed(previous: dict[str, Any], current: dict[str, Any]) -> bool:
+    if previous.get("exists") != current.get("exists"):
+        return True
+    if previous.get("identity_scheme") != current.get("identity_scheme"):
+        # Recorded under an older identity format: existence is all that compares.
+        return False
+    return previous.get("identity") != current.get("identity")
 
 
 def declared_evidence_report(items: list[str], max_anchors: int = 12) -> EvidenceReport:
@@ -210,15 +230,40 @@ class EvidenceInspector:
             specs.append((kind, target, locator))
         return specs
 
-    def _identity_for_files(self, files: list[str]) -> str:
-        identities: list[str] = []
-        for rel in sorted(files):
-            identity = self._tracked.get(rel)
-            full = self.repository_root / Path(*PurePosixPath(rel).parts)
-            if full.is_file() and (identity is None or rel in self._dirty):
-                identity = hashlib.sha256(full.read_bytes()).hexdigest()
-            identities.append(f"{rel}:{identity or 'missing'}")
-        return hashlib.sha256("\n".join(identities).encode("utf-8")).hexdigest() if identities else ""
+    @staticmethod
+    def _git_blob_id(data: bytes) -> str:
+        """Git-compatible blob id of normalized content.
+
+        Text is compared with LF line endings, so a CRLF working copy of an
+        unchanged file has the same identity as its committed blob.
+        """
+        if b"\0" not in data:
+            data = data.replace(b"\r\n", b"\n")
+        header = f"blob {len(data)}\0".encode("ascii")
+        return hashlib.sha1(header + data).hexdigest()
+
+    def _file_identity(self, rel: str) -> str:
+        identity = self._tracked.get(rel)
+        full = self.repository_root / Path(*PurePosixPath(rel).parts)
+        if full.is_file() and (identity is None or rel in self._dirty):
+            try:
+                identity = self._git_blob_id(full.read_bytes())
+            except OSError:
+                identity = None
+        return identity or "missing"
+
+    def _identity_for_files(self, files: list[str], structural: bool = False) -> str:
+        """Identity of the files backing one anchor.
+
+        Directory and glob anchors are structural: only files appearing or
+        disappearing change them. Content edits inside a broad anchor are too
+        frequent to signal anything about the note that cites it.
+        """
+        if structural:
+            entries = sorted(files)
+        else:
+            entries = [f"{rel}:{self._file_identity(rel)}" for rel in sorted(files)]
+        return hashlib.sha256("\n".join(entries).encode("utf-8")).hexdigest() if entries else ""
 
     def _matching_files(self, kind: str, target: str) -> tuple[list[str], bool]:
         full = self.repository_root / Path(*PurePosixPath(target).parts)
@@ -263,6 +308,7 @@ class EvidenceInspector:
                 seen.add(key)
                 files, exists = self._matching_files(kind, target)
                 full = self.repository_root / Path(*PurePosixPath(target).parts)
+                structural = kind in {"glob", "dir"} or full.is_dir()
                 if locator and full.is_file():
                     try:
                         exists = exists and locator in full.read_text(encoding="utf-8", errors="ignore")
@@ -275,7 +321,7 @@ class EvidenceInspector:
                         target=target,
                         locator=locator,
                         exists=exists,
-                        identity=self._identity_for_files(files),
+                        identity=self._identity_for_files(files, structural=structural),
                         working_tree_state=self._working_tree_state(target, files),
                     )
                 )
@@ -285,20 +331,16 @@ class EvidenceInspector:
             anchors=tuple(anchors),
             max_anchors=self.max_anchors,
         )
+        # Without a previous snapshot there is no baseline to drift from: an
+        # uncommitted edit to an anchored file is not evidence the note is wrong.
         changed: list[str] = []
         if previous_snapshot and not verification_updated:
             for key, value in preliminary.snapshot.items():
-                if previous_snapshot.get(key) != value:
+                if key in previous_snapshot and _anchor_changed(previous_snapshot[key], value):
                     changed.append(str(value["target"]))
             for key, value in previous_snapshot.items():
                 if key not in preliminary.snapshot:
                     changed.append(str(value.get("target", key)))
-        elif not previous_snapshot and not verification_updated:
-            changed.extend(
-                anchor.target
-                for anchor in anchors
-                if anchor.working_tree_state != "clean"
-            )
         return EvidenceReport(
             declared_count=len(items),
             anchors=tuple(anchors),

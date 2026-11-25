@@ -34,7 +34,8 @@ Typed note kinds: `rule`, `decision`, `reference`, `runbook`, `glossary`, and `i
 - Prefer `wiki_edit(path: str, old_text: str, new_text: str)` for small updates to
   existing notes. It replaces exactly one literal occurrence of `old_text`, with
   no regex, fuzzy matching, or replace-all behavior. `old_text` must be nonempty;
-  empty `new_text` deletes the matched text.
+  empty `new_text` deletes the matched text. CRLF/LF differences between the
+  fragment and the note are tolerated; the note keeps its own line endings.
 - Edit conflicts are `not_found` (note does not exist), `text_not_found` (no exact
   match), and `ambiguous_match` (more than one exact match). Conflicts make no
   writes and schedule no reindex. Re-read the note and choose a unique literal
@@ -63,7 +64,8 @@ Typed note kinds: `rule`, `decision`, `reference`, `runbook`, `glossary`, and `i
 - `KB_TOP_K=8`
 - `KB_MAX_TOP_K=20`
 - `KB_MIN_RELEVANCE=0.35`
-- `KB_STALENESS_DAYS=90`
+- `KB_STALENESS_DAYS=90` (age warnings apply only to `KB_STALENESS_KINDS=rule,decision`)
+- `KB_PENDING_MAX_DAYS=7` (pending notes older than this are reported as overdue)
 
 ## Run directly (without wiki-kit)
 
@@ -106,7 +108,8 @@ silently expanding the Python/runtime API contract.
 
 ## Related docs
 
-- stack overview, install, and lifecycle: [../README.md](../README.md)
+- install and day-to-day use: [../README.md](../README.md)
+- health signals and runner internals: [../docs/technical.md](../docs/technical.md)
 
 ## License
 

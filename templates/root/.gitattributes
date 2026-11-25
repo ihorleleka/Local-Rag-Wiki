@@ -1,0 +1,5 @@
+# BEGIN WIKI-KIT MANAGED LINE ENDINGS
+# Keep wiki notes LF in every checkout so wiki_edit fragments and evidence
+# identities match regardless of core.autocrlf.
+wiki/**/*.md text eol=lf
+# END WIKI-KIT MANAGED LINE ENDINGS

@@ -270,6 +270,26 @@ def _parse_last_verified(value: str | None) -> date | None:
         return None
 
 
+def _with_line_endings(text: str, newline: str) -> str:
+    normalized = text.replace("\r\n", "\n")
+    return normalized if newline == "\n" else normalized.replace("\n", newline)
+
+
+def _staleness_kinds(settings: Any) -> frozenset[str]:
+    kinds = getattr(settings, "staleness_kinds", None)
+    return frozenset(kinds) if kinds is not None else frozenset({"rule", "decision"})
+
+
+def _pending_age_days(metadata: dict[str, Any]) -> int | None:
+    """Days since a pending note was captured (or last verified, if no capture date)."""
+    started = _parse_last_verified(
+        _normalise_date(metadata.get("captured")) or _normalise_date(metadata.get("last_verified"))
+    )
+    if started is None:
+        return None
+    return max(0, (date.today() - started).days)
+
+
 def _normalise_kind(value: Any, sections: dict[str, str]) -> tuple[str, bool]:
     raw = str(value or "").strip().lower()
     if raw in NOTE_KINDS:
@@ -562,6 +582,9 @@ class KnowledgeIndex:
         last_verified = _normalise_date(metadata.get("last_verified"))
         verified_date = _parse_last_verified(last_verified)
         stale = verified_date is not None and verified_date < date.today() - timedelta(days=self.settings.staleness_days)
+        # Age is reported for every note but only warns where silent aging misleads.
+        age_sensitive = kind in _staleness_kinds(self.settings)
+        pending_age_days = _pending_age_days(metadata)
 
         gaps: list[str] = []
         schema_issues: list[str] = []
@@ -579,21 +602,25 @@ class KnowledgeIndex:
         elif note_status not in NOTE_STATUSES:
             schema_issues.append(f"invalid status frontmatter: {note_status}")
         gaps.extend(schema_issues)
-        if not last_verified:
+        is_pending = note_status == "pending"
+        if is_pending:
+            pending_max_days = int(getattr(self.settings, "pending_max_days", 7))
+            if pending_age_days is not None and pending_age_days > pending_max_days:
+                gaps.append(
+                    f"pending for {pending_age_days} days; verify and promote or delete it"
+                )
+            else:
+                gaps.append("pending candidate; not verified")
+        elif not last_verified:
             gaps.append("missing last_verified")
-        elif stale:
+        elif stale and age_sensitive:
             gaps.append("last_verified exceeds staleness threshold")
         if evidence_report.state == "missing":
             gaps.append("evidence not provided")
             if evidence_report.missing_targets:
                 gaps[-1] = "missing evidence anchors: " + ", ".join(evidence_report.missing_targets[:4])
-        if evidence_report.state == "changed_since_verification":
-            targets = evidence_report.changed_targets or tuple(
-                anchor.target
-                for anchor in evidence_report.anchors
-                if anchor.working_tree_state != "clean"
-            )
-            gaps.append("evidence changed since verification: " + ", ".join(targets[:4]))
+        # Changed anchors stay visible in evidence_state/evidence_issues as an audit
+        # hint; they are not a gap, because most code changes do not falsify a note.
         if evidence_report.excessive_inventory:
             gaps.append(
                 f"evidence inventory has {evidence_report.verifiable_count} anchors; "
@@ -614,8 +641,10 @@ class KnowledgeIndex:
         evidence_state = evidence_report.state
         verification_required = (
             schema_health != "complete"
-            or freshness_state != "current"
-            or evidence_state != "present"
+            or is_pending
+            or evidence_state == "missing"
+            or freshness_state == "unknown"
+            or (freshness_state == "stale" and age_sensitive)
         )
 
         # Resolved anchor provenance lets agents cite the exact repository file,
@@ -812,7 +841,12 @@ class KnowledgeIndex:
         packet_files = 0
         oversized_files = 0
         files_with_issues = 0
+        files_with_errors = 0
         issue_count = 0
+        by_severity: dict[str, int] = {"error": 0, "warning": 0, "info": 0}
+        pending_max_days = int(getattr(self.settings, "pending_max_days", 7))
+        staleness_kinds = _staleness_kinds(self.settings)
+        stale_before = date.today() - timedelta(days=self.settings.staleness_days)
 
         for record in records:
             metadata = record["metadata"]
@@ -851,10 +885,25 @@ class KnowledgeIndex:
                 add_issue("warning", "missing_status", "missing status frontmatter")
             elif status not in NOTE_STATUSES:
                 add_issue("warning", "invalid_status", f"status should be one of {sorted(NOTE_STATUSES)}")
-            if not last_verified:
+            # Pending notes are unverified by definition; their age is tracked instead.
+            if status == "pending":
+                pending_age = _pending_age_days(metadata)
+                if pending_age is not None and pending_age > pending_max_days:
+                    add_issue(
+                        "warning",
+                        "pending_overdue",
+                        f"pending for {pending_age} days (limit {pending_max_days}); verify and promote or delete it",
+                    )
+            elif not last_verified:
                 add_issue("error", "missing_last_verified", "missing last_verified frontmatter")
             elif verified_date is None:
                 add_issue("error", "invalid_last_verified", "last_verified is not an ISO date")
+            elif kind in staleness_kinds and verified_date < stale_before:
+                add_issue(
+                    "warning",
+                    "stale_verification",
+                    f"{kind} last verified {last_verified}, older than {self.settings.staleness_days} days",
+                )
             if record["line_count"] > max_note_lines:
                 add_issue(
                     "warning",
@@ -870,9 +919,11 @@ class KnowledgeIndex:
                     f"capability specification is missing {section} section",
                 )
             if packet is None:
-                add_issue("error", "packet_not_compiled", "note does not compile into a context packet")
-            elif packet.verification_required:
-                add_issue("warning", "verification_required", "packet requires verification")
+                add_issue(
+                    "error",
+                    "packet_not_compiled",
+                    "note does not compile into a context packet; add frontmatter and the required sections for its kind",
+                )
             for link in record["broken_links"]:
                 add_issue("warning", "broken_wiki_link", f"wiki link target not found: {link}")
             if evidence_report.missing_targets:
@@ -887,8 +938,9 @@ class KnowledgeIndex:
             if evidence_report.changed_targets:
                 sample = ", ".join(evidence_report.changed_targets[:4])
                 remainder = len(evidence_report.changed_targets) - 4
+                # Audit hint only: anchored code changed since the last indexing.
                 add_issue(
-                    "warning",
+                    "info",
                     "changed_evidence_anchors",
                     f"{len(evidence_report.changed_targets)} evidence anchor(s) changed: {sample}"
                     + (f" (+{remainder} more)" if remainder > 0 else ""),
@@ -904,9 +956,15 @@ class KnowledgeIndex:
                 packet_files += 1
             if record["line_count"] > max_note_lines:
                 oversized_files += 1
-            if issues:
+            # Info findings are audit hints; they do not make a note "have issues".
+            actionable = [issue for issue in issues if issue["severity"] != "info"]
+            for issue in issues:
+                by_severity[issue["severity"]] = by_severity.get(issue["severity"], 0) + 1
+            if actionable:
                 files_with_issues += 1
-                issue_count += len(issues)
+                issue_count += len(actionable)
+            if any(issue["severity"] == "error" for issue in issues):
+                files_with_errors += 1
             by_kind[kind] = by_kind.get(kind, 0) + 1
             if status:
                 by_status[status] = by_status.get(status, 0) + 1
@@ -948,7 +1006,9 @@ class KnowledgeIndex:
                 "oversized_files": oversized_files,
                 "max_note_lines": max_note_lines,
                 "files_with_issues": files_with_issues,
+                "files_with_errors": files_with_errors,
                 "issue_count": issue_count,
+                "by_severity": by_severity,
                 "by_kind": dict(sorted(by_kind.items())),
                 "by_status": dict(sorted(by_status.items())),
             },
@@ -1871,6 +1931,8 @@ class KnowledgeIndex:
             "kind: investigation",
             f"scope: {scope.strip() or 'project-specific'}",
             "status: pending",
+            # Capture date drives the pending-age warning; it is not a verification.
+            f"captured: {date.today().isoformat()}",
             f"applies_to:{applies_lines}" if applies_lines else "applies_to: []",
             "---",
         ]
@@ -2010,7 +2072,14 @@ class KnowledgeIndex:
                 return {"status": "conflict", "reason": "not_found", "path": canonical_path}
             with target.open("r", encoding="utf-8", newline="") as document:
                 content = document.read()
+            # Checkouts with core.autocrlf store notes as CRLF while agents send LF
+            # (or vice versa). Match and write in the note's own line-ending style.
+            newline = "\r\n" if "\r\n" in content else "\n"
+            new_text = _with_line_endings(new_text, newline)
             start = content.find(old_text)
+            if start < 0:
+                old_text = _with_line_endings(old_text, newline)
+                start = content.find(old_text)
             if start < 0:
                 return {"status": "conflict", "reason": "text_not_found", "path": canonical_path}
             # Include overlapping occurrences: 'aa' is ambiguous in 'aaa'.

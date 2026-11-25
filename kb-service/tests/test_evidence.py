@@ -117,6 +117,62 @@ class EvidenceInspectorTests(unittest.TestCase):
             self.assertEqual(committed.state, "changed_since_verification")
             self.assertEqual(committed.changed_targets, ("src/Owner.cs",))
 
+    def test_directory_anchors_track_structure_not_content_edits(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_repository(root)
+            first = EvidenceInspector(root).inspect(["dir: src"])
+
+            (root / "src" / "Owner.cs").write_text("class Owner { int Version = 2; }\n", encoding="utf-8")
+            edited = EvidenceInspector(root).inspect(["dir: src"], first.snapshot)
+            self.assertEqual(edited.state, "present")
+
+            (root / "src" / "Added.cs").write_text("class Added {}\n", encoding="utf-8")
+            added = EvidenceInspector(root).inspect(["dir: src"], first.snapshot)
+            self.assertEqual(added.state, "changed_since_verification")
+
+    def test_line_endings_and_working_tree_state_alone_are_not_drift(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_repository(root)
+            first = EvidenceInspector(root).inspect(["src/Owner.cs"])
+
+            (root / "src" / "Owner.cs").write_bytes(b"class Owner {}\r\n")
+            crlf = EvidenceInspector(root).inspect(["src/Owner.cs"], first.snapshot)
+            self.assertEqual(crlf.state, "present")
+
+            (root / "src" / "Owner.cs").write_text("class Owner { int Version = 2; }\n", encoding="utf-8")
+            dirty = EvidenceInspector(root).inspect(["src/Owner.cs"], first.snapshot)
+            git(root, "add", "src/Owner.cs")
+            git(root, "commit", "-m", "commit the same content")
+            committed = EvidenceInspector(root).inspect(["src/Owner.cs"], dirty.snapshot)
+            self.assertEqual(committed.state, "present")
+
+    def test_uncommitted_edit_without_baseline_is_not_drift(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_repository(root)
+            (root / "src" / "Owner.cs").write_text("class Owner { int Version = 2; }\n", encoding="utf-8")
+            report = EvidenceInspector(root).inspect(["src/Owner.cs"])
+            self.assertEqual(report.state, "present")
+
+    def test_snapshots_from_an_older_identity_scheme_compare_existence_only(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            make_repository(root)
+            legacy = {
+                "path:src/Owner.cs#": {
+                    "kind": "path",
+                    "target": "src/Owner.cs",
+                    "locator": "",
+                    "exists": True,
+                    "identity": "sha256-from-an-older-release",
+                    "working_tree_state": "clean",
+                }
+            }
+            report = EvidenceInspector(root).inspect(["src/Owner.cs"], legacy)
+            self.assertEqual(report.state, "present")
+
     def test_explicit_verification_snapshots_dirty_bytes_and_detects_later_edits(self) -> None:
         with TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

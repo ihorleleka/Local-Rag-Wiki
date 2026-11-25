@@ -39,10 +39,16 @@ function printUsage() {
   wiki-kit update [target] [--force] [--agents-dir <dir>] [--skip-root] [--skip-docker]
   wiki-kit status [target] [--agents-dir <dir>]
   wiki-kit doctor [target] [--agents-dir <dir>] [--live]
-  wiki-kit start [target] [--agents-dir <dir>]
+  wiki-kit start [target] [--keep-warm] [--agents-dir <dir>]
   wiki-kit stop [target] [--agents-dir <dir>]
-  wiki-kit restart [target] [--agents-dir <dir>]
+  wiki-kit restart [target] [--keep-warm] [--agents-dir <dir>]
   wiki-kit pull [target] [--agents-dir <dir>]
+  wiki-kit schema-report [target] [--json] [--agents-dir <dir>]
+  wiki-kit search [target] "<query>" [--top-k <n>] [--depth abstract|packet]
+                  [--path-prefix <dir>] [--include-inactive] [--json] [--agents-dir <dir>]
+
+schema-report and search use the same wiki-manager service as the MCP tools, so
+they work when an agent session has no wiki_* tools. They start the container if needed.
 
 Examples:
   npx github:ihorleleka/Local-Rag-Wiki install .
@@ -52,6 +58,8 @@ Examples:
   npx github:ihorleleka/Local-Rag-Wiki start .
   npx github:ihorleleka/Local-Rag-Wiki stop .
   npx github:ihorleleka/Local-Rag-Wiki pull .
+  npx github:ihorleleka/Local-Rag-Wiki schema-report .
+  npx github:ihorleleka/Local-Rag-Wiki search . "how is auth handled"
   .agents\\update-wiki-kit.cmd
   sh ./.agents/update-wiki-kit.sh`);
 }
@@ -68,7 +76,11 @@ function parseArgs(argv) {
     skipRoot: false,
     skipDocker: process.env.WIKI_KIT_SKIP_DOCKER === "1",
     live: false,
+    json: false,
+    includeInactive: false,
+    keepWarm: false,
   };
+  const positionals = [];
 
   if (command === "--help" || command === "-h") {
     options.command = "help";
@@ -90,13 +102,41 @@ function parseArgs(argv) {
       if (!value) throw new Error("--agents-dir requires a value");
       options.agentsDir = value;
       options.agentsDirProvided = true;
+    } else if (arg === "--keep-warm") {
+      options.keepWarm = true;
+    } else if (arg === "--json") {
+      options.json = true;
+    } else if (arg === "--include-inactive") {
+      options.includeInactive = true;
+    } else if (arg === "--top-k" || arg === "--depth" || arg === "--path-prefix") {
+      const value = args.shift();
+      if (!value) throw new Error(`${arg} requires a value`);
+      if (arg === "--top-k") {
+        options.topK = Number(value);
+        if (!Number.isInteger(options.topK) || options.topK < 1) {
+          throw new Error("--top-k must be a positive integer");
+        }
+      } else if (arg === "--depth") {
+        if (!["abstract", "packet"].includes(value)) throw new Error("--depth must be abstract or packet");
+        options.depth = value;
+      } else {
+        options.pathPrefix = value;
+      }
     } else if (arg === "--help" || arg === "-h") {
       options.command = "help";
     } else if (arg.startsWith("--")) {
       throw new Error(`Unknown option: ${arg}`);
     } else {
-      options.target = arg;
+      positionals.push(arg);
     }
+  }
+
+  if (options.command === "search") {
+    // Both are required so `search .` is never mistaken for the query ".".
+    if (positionals.length !== 2) throw new Error('search takes a target and a query: wiki-kit search . "<query>"');
+    [options.target, options.query] = positionals;
+  } else if (positionals.length > 0) {
+    options.target = positionals[positionals.length - 1];
   }
 
   return options;
@@ -570,6 +610,22 @@ function mergeVscodeSettings(sourcePath, targetPath) {
   fs.writeFileSync(targetPath, normalizeTrailingNewline(content), "utf8");
 }
 
+// Claude Code gives an MCP server 30 s to start unless MCP_TIMEOUT says otherwise.
+// Codex and OpenCode already get 150 s from their generated config. Merge only the
+// missing key: a value the user chose (even a smaller one) stays theirs.
+function mergeClaudeSettings(sourcePath, targetPath) {
+  let content = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, "utf8") : "{}\n";
+  const managed = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+  if (fs.existsSync(targetPath)) readJsonConfig(targetPath);
+  const existing = JSON.parse(stripJsonComments(content));
+  for (const [name, value] of Object.entries(managed.env || {})) {
+    if (existing.env && typeof existing.env === "object" && Object.hasOwn(existing.env, name)) continue;
+    content = setJsoncPath(content, ["env", name], value);
+  }
+  ensureDir(path.dirname(targetPath));
+  fs.writeFileSync(targetPath, normalizeTrailingNewline(content), "utf8");
+}
+
 function removeExistingCodexWikiBlock(content) {
   const lines = content.split(/\r?\n/);
   const output = [];
@@ -598,8 +654,34 @@ function mergeCodexToml(existing, templateContent) {
   return `${withoutOldWikiBlock.trimEnd()}\n\n${block}\n`;
 }
 
+const GITATTRIBUTES_BEGIN = "# BEGIN WIKI-KIT MANAGED LINE ENDINGS";
+const GITATTRIBUTES_END = "# END WIKI-KIT MANAGED LINE ENDINGS";
+
+// Replace the managed block in place (or append it) and keep every user rule.
+function mergeGitattributes(existing, templateContent) {
+  const block = templateContent.trim();
+  const eol = existing.includes("\r\n") ? "\r\n" : "\n";
+  const beginIndex = existing.indexOf(GITATTRIBUTES_BEGIN);
+  const endIndex = beginIndex === -1 ? -1 : existing.indexOf(GITATTRIBUTES_END, beginIndex);
+  let merged;
+  if (beginIndex !== -1 && endIndex !== -1) {
+    merged = `${existing.slice(0, beginIndex)}${block}${existing.slice(endIndex + GITATTRIBUTES_END.length)}`;
+  } else if (existing.trim()) {
+    merged = `${existing.trimEnd()}\n\n${block}\n`;
+  } else {
+    merged = `${block}\n`;
+  }
+  return normalizeTrailingNewline(merged.replace(/\r\n/g, "\n")).replace(/\n/g, eol);
+}
+
 function writeRootAsset(sourcePath, targetPath, relativePath, options) {
   const sourceContent = rewriteAgentsDir(fs.readFileSync(sourcePath, "utf8"), options.agentsDir);
+
+  if (relativePath === ".gitattributes") {
+    const existing = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, "utf8") : "";
+    fs.writeFileSync(targetPath, mergeGitattributes(existing, sourceContent), "utf8");
+    return existing ? "merged" : "copied";
+  }
 
   if (["AGENTS.md", "CLAUDE.md"].includes(relativePath)) {
     const existing = fs.existsSync(targetPath) ? fs.readFileSync(targetPath, "utf8") : "";
@@ -627,6 +709,11 @@ function writeRootAsset(sourcePath, targetPath, relativePath, options) {
     return "merged";
   }
 
+  if (relativePath === ".claude/settings.json") {
+    mergeClaudeSettings(sourcePath, targetPath);
+    return "merged";
+  }
+
   if (fs.existsSync(targetPath) && !options.force) return "skipped";
   ensureDir(path.dirname(targetPath));
   fs.writeFileSync(targetPath, sourceContent, "utf8");
@@ -637,7 +724,7 @@ function writeRootAsset(sourcePath, targetPath, relativePath, options) {
 // than maintaining a second skill body or requiring symlink privileges.
 function claudeSkillAssets() {
   const sourceRoot = path.join(PACKAGE_ROOT, "templates", "root", ".agents", "skills", "wiki");
-  return ["SKILL.md", "references/authoring.md"].map((relativePath) => ({
+  return ["SKILL.md", "references/authoring.md", "references/recovery.md"].map((relativePath) => ({
     relativePath: `.claude/skills/wiki/${relativePath}`,
     sourcePath: path.join(sourceRoot, relativePath),
   }));
@@ -788,11 +875,24 @@ function compareRootAssets(targetRoot, agentsDir) {
     const actual = fs.readFileSync(targetPath, "utf8");
     if (["AGENTS.md", "CLAUDE.md"].includes(portablePath) && actual.includes(expected.trim())) {
       result.current.push(portablePath);
+    } else if (portablePath === ".gitattributes") {
+      (actual.replace(/\r\n/g, "\n").includes(expected.replace(/\r\n/g, "\n").trim()) ? result.current : result.changed).push(portablePath);
     } else if (portablePath === ".codex/config.toml" && actual.includes(expected.trim())) {
       result.current.push(portablePath);
     } else if ([".vscode/mcp.json", ".mcp.json", "opencode.jsonc", ".dsh/mcp.servers.yml"].includes(portablePath)) {
       const validation = validateMcpConfig(targetRoot, agentsDir, portablePath);
       (validation.state === "current" ? result.current : result.changed).push(portablePath);
+    } else if (portablePath === ".claude/settings.json") {
+      try {
+        const managed = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
+        const installed = readJsonConfig(targetPath);
+        const isCurrent = Object.keys(managed.env || {}).every(
+          (name) => installed.env && Object.hasOwn(installed.env, name)
+        );
+        (isCurrent ? result.current : result.changed).push(portablePath);
+      } catch {
+        result.changed.push(portablePath);
+      }
     } else if (portablePath === ".vscode/settings.json") {
       try {
         const managed = JSON.parse(fs.readFileSync(sourcePath, "utf8"));
@@ -1294,7 +1394,7 @@ async function runDoctor(options) {
   }
 }
 
-function runRunnerCommand(targetRoot, agentsRoot, command) {
+function runRunnerCommand(targetRoot, agentsRoot, command, { keepWarm = false } = {}) {
   const runnerPath = path.join(agentsRoot, "run-wiki-manager.mcp.js");
   if (!fs.existsSync(runnerPath)) {
     throw new Error(`MCP runner is missing: ${runnerPath}`);
@@ -1305,6 +1405,7 @@ function runRunnerCommand(targetRoot, agentsRoot, command) {
     env: {
       ...process.env,
       KB_LIFECYCLE_COMMAND: command,
+      ...(keepWarm && !process.env.KB_RESTART_POLICY ? { KB_RESTART_POLICY: "unless-stopped" } : {}),
     },
     encoding: "utf8",
     stdio: "pipe",
@@ -1324,7 +1425,22 @@ function runRunnerCommand(targetRoot, agentsRoot, command) {
 
 function runLifecycle(options) {
   const { targetRoot, agentsRoot } = getInstallState(options);
-  runRunnerCommand(targetRoot, agentsRoot, options.command);
+  const keepWarm = options.keepWarm && options.command !== "stop";
+  runRunnerCommand(targetRoot, agentsRoot, options.command, { keepWarm });
+  if (keepWarm) {
+    // A container the runner merely attached to keeps its old policy; set it explicitly.
+    const containerName = deriveResourceNames(targetRoot, process.env).containerName;
+    const policy = process.env.KB_RESTART_POLICY || "unless-stopped";
+    const update = spawnSync("docker", ["update", "--restart", policy, containerName], {
+      encoding: "utf8",
+      stdio: "pipe",
+      windowsHide: true,
+    });
+    if (update.status !== 0) {
+      throw new Error(`could not set restart policy: ${(update.stderr || update.error?.message || "").trim()}`);
+    }
+    console.log(`Restart policy ${policy} set: the container comes back after a reboot or Docker Desktop restart.`);
+  }
   console.log(`Wiki MCP container ${options.command} completed for ${targetRoot}`);
 }
 
@@ -1404,11 +1520,189 @@ function runPull() {
   console.log(`Pulled wiki MCP image: ${image}`);
 }
 
+// Calls wiki-manager tools through the managed runner, for agents that have no
+// MCP tools in their session (for example after a host startup timeout). The
+// runner is started in blocking mode (KB_LAZY_INIT=0), so it brings the container
+// up or attaches to it first. Each call is { name, arguments, until?(result) }:
+// `until` makes the client poll a tool that refreshes its answer in the background.
+function callRunnerTools(targetRoot, agentsRoot, calls, { timeoutMs = 240000 } = {}) {
+  const runnerPath = path.join(agentsRoot, "run-wiki-manager.mcp.js");
+  if (!fs.existsSync(runnerPath)) {
+    return Promise.reject(new Error(`MCP runner is missing: ${runnerPath}`));
+  }
+  return new Promise((resolve, reject) => {
+    const child = require("child_process").spawn(process.execPath, [runnerPath], {
+      cwd: targetRoot,
+      env: { ...process.env, KB_LAZY_INIT: "0" },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let nextId = 2;
+    let index = 0;
+    const results = [];
+    let pollStarted = 0;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      child.stdin.end();
+      if (error) reject(error);
+      else resolve(results);
+    };
+    const timer = setTimeout(
+      () => finish(new Error(`timed out after ${Math.round(timeoutMs / 1000)}s. ${stderr.trim()}`.trim())),
+      timeoutMs
+    );
+    const send = (message) => child.stdin.write(`${JSON.stringify(message)}\n`);
+    const sendCall = () => {
+      const call = calls[index];
+      send({
+        jsonrpc: "2.0",
+        id: nextId += 1,
+        method: "tools/call",
+        params: { name: call.name, arguments: call.arguments || {} },
+      });
+    };
+    const payloadOf = (result) => {
+      if (result.structuredContent !== undefined && result.structuredContent !== null) {
+        const structured = result.structuredContent;
+        return structured && typeof structured === "object" && Object.keys(structured).length === 1 && "result" in structured
+          ? structured.result
+          : structured;
+      }
+      const text = (result.content || []).map((part) => part.text || "").join("");
+      try { return JSON.parse(text); } catch { return text; }
+    };
+
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString("utf8"); });
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+      while (stdout.includes("\n")) {
+        const newline = stdout.indexOf("\n");
+        const line = stdout.slice(0, newline).trim();
+        stdout = stdout.slice(newline + 1);
+        if (!line) continue;
+        let message;
+        try { message = JSON.parse(line); } catch { continue; }
+        if (message.id === 1) {
+          if (!message.result?.serverInfo) return finish(new Error(`initialize failed: ${line}`));
+          send({ jsonrpc: "2.0", method: "notifications/initialized", params: {} });
+          pollStarted = Date.now();
+          sendCall();
+        } else if (message.id >= 3) {
+          if (message.error) return finish(new Error(message.error.message || line));
+          const call = calls[index];
+          if (message.result?.isError) {
+            const text = (message.result.content || []).map((part) => part.text || "").join(" ");
+            return finish(new Error(`${call.name} failed: ${text || line}`));
+          }
+          const payload = payloadOf(message.result || {});
+          const waiting = call.until && !call.until(payload) && Date.now() - pollStarted < (call.pollMs ?? 90000);
+          if (waiting) {
+            setTimeout(() => { if (!settled) sendCall(); }, 1000);
+            continue;
+          }
+          results.push({ payload, settled: !call.until || call.until(payload) });
+          index += 1;
+          pollStarted = Date.now();
+          if (index >= calls.length) finish();
+          else sendCall();
+        }
+      }
+    });
+    child.on("error", (error) => finish(error));
+    child.on("exit", (code) => {
+      if (!settled) finish(new Error(`MCP runner exited with ${code}. ${stderr.trim()}`.trim()));
+    });
+    send({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: {
+        protocolVersion: "2025-03-26",
+        capabilities: {},
+        clientInfo: { name: "wiki-kit-cli", version: readPackageMetadata().version },
+      },
+    });
+  });
+}
+
+function formatSchemaReport(report) {
+  const lines = [];
+  const summary = report.summary || {};
+  const severity = summary.by_severity;
+  lines.push(
+    `Wiki schema report: ${report.total_files ?? 0} note(s), ${summary.files_with_issues ?? 0} with issues, ` +
+      (severity
+        ? `${severity.error ?? 0} error(s), ${severity.warning ?? 0} warning(s), ${severity.info ?? 0} audit hint(s)`
+        : `${summary.issue_count ?? 0} issue(s)`)
+  );
+  for (const file of report.files || []) {
+    if (!file.issues?.length) continue;
+    lines.push(`${file.source_file}`);
+    for (const issue of file.issues) {
+      lines.push(`  [${issue.severity}] ${issue.code}: ${issue.message}`);
+    }
+  }
+  return lines;
+}
+
+async function runSchemaReport(options) {
+  const { targetRoot, agentsRoot } = getInstallState(options);
+  const [{ payload: report, settled }] = await callRunnerTools(targetRoot, agentsRoot, [
+    {
+      name: "wiki_schema_report",
+      // The first answer is the last cached audit; poll until the refresh lands.
+      until: (value) => value?.audit && value.audit.stale === false && value.audit.status === "idle",
+    },
+  ]);
+  if (options.json) {
+    console.log(JSON.stringify(report, null, 2));
+  } else {
+    for (const line of formatSchemaReport(report)) console.log(line);
+  }
+  if (!settled) {
+    console.warn("wiki-kit: the schema audit was still refreshing; findings may be incomplete. Re-run in a minute.");
+  }
+  const errors = (report.files || []).reduce(
+    (count, file) => count + (file.issues || []).filter((issue) => issue.severity === "error").length,
+    0
+  );
+  if (errors > 0 || !settled) process.exitCode = 1;
+}
+
+async function runSearch(options) {
+  const { targetRoot, agentsRoot } = getInstallState(options);
+  const args = { query: options.query };
+  if (options.topK !== undefined) args.top_k = options.topK;
+  if (options.depth) args.depth = options.depth;
+  if (options.pathPrefix) args.path_prefix = options.pathPrefix;
+  if (options.includeInactive) args.include_inactive = true;
+  const [{ payload }] = await callRunnerTools(targetRoot, agentsRoot, [{ name: "wiki_search", arguments: args }]);
+  if (options.json) {
+    console.log(JSON.stringify(payload, null, 2));
+    return;
+  }
+  for (const item of payload.results || []) {
+    const source = item.source || item.source_file || item.packet?.source || "unknown";
+    console.log(`${source}  (score ${item.relevance_score ?? "?"})`);
+    const text = item.abstract || item.packet?.summary || item.context || "";
+    if (text) console.log(`  ${String(text).trim().replace(/\s+/g, " ").slice(0, 240)}`);
+  }
+  const diagnostics = payload.diagnostics || {};
+  console.log(`${diagnostics.result_count ?? 0} result(s)${diagnostics.message ? `: ${diagnostics.message}` : ""}`);
+}
+
 function run(options) {
   if (!options.command || options.command === "help") {
     printUsage();
     return;
   }
+  if (options.command === "schema-report") return runSchemaReport(options);
+  if (options.command === "search") return runSearch(options);
   if (options.command === "status") {
     runStatus(options);
     return;

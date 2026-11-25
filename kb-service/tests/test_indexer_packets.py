@@ -603,6 +603,71 @@ Verify stale notes before applying them.
         self.assertTrue(packet.verification_required)
         self.assertIn("evidence not provided", packet.gaps)
 
+    REFERENCE_BODY = """# Owner
+
+## Use this when
+Changing the owner.
+
+## Summary
+The owner contract.
+
+## Key facts
+- One fact.
+
+## Evidence
+- README.md
+
+## Retrieval hints
+- owner contract
+"""
+
+    def compile_reference(self, metadata: dict, evidence_report=None):
+        with TemporaryDirectory() as tmpdir:
+            settings = types.SimpleNamespace(
+                wiki_root=Path(tmpdir) / "wiki",
+                kb_root=Path(tmpdir) / "kb",
+                embedding_model="dummy",
+                staleness_days=90,
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+            return index.compile_context_packet(
+                "Owner.md",
+                {"id": "owner", "kind": "reference", "status": "active", **metadata},
+                self.REFERENCE_BODY,
+                evidence_report,
+            )
+
+    def test_age_only_requires_verification_for_rule_and_decision_kinds(self) -> None:
+        old = (date.today() - timedelta(days=400)).isoformat()
+        packet = self.compile_reference({"last_verified": old})
+        assert packet is not None
+        self.assertEqual(packet.freshness_state, "stale")
+        self.assertFalse(packet.verification_required)
+        self.assertEqual(packet.gaps, [])
+
+    def test_changed_evidence_is_an_audit_hint_not_a_verification_failure(self) -> None:
+        from kb_service.evidence import EvidenceAnchor, EvidenceReport
+
+        anchor = EvidenceAnchor("README.md", "path", "README.md", "", True, "new", "clean")
+        report = EvidenceReport(1, (anchor,), changed_targets=("README.md",))
+        packet = self.compile_reference({"last_verified": date.today().isoformat()}, report)
+        assert packet is not None
+        self.assertEqual(packet.evidence_state, "changed_since_verification")
+        self.assertFalse(packet.verification_required)
+        self.assertEqual(packet.gaps, [])
+        self.assertIn("changed: README.md", packet.metadata["evidence_issues"])
+
+    def test_pending_notes_require_verification_and_report_overdue_age(self) -> None:
+        fresh = self.compile_reference({"status": "pending", "captured": date.today().isoformat()})
+        overdue = self.compile_reference(
+            {"status": "pending", "captured": (date.today() - timedelta(days=10)).isoformat()}
+        )
+        assert fresh is not None and overdue is not None
+        self.assertTrue(fresh.verification_required)
+        self.assertEqual(fresh.gaps, ["pending candidate; not verified"])
+        self.assertTrue(overdue.verification_required)
+        self.assertEqual(overdue.gaps, ["pending for 10 days; verify and promote or delete it"])
+
     def test_packet_embedding_keeps_routing_fields_inside_token_budget(self) -> None:
         with TemporaryDirectory() as tmpdir:
             settings = types.SimpleNamespace(
@@ -858,6 +923,66 @@ Use typed packets.
         self.assertIn("missing_or_invalid_kind", issue_codes)
         self.assertIn("missing_last_verified", issue_codes)
         self.assertIn("broken_wiki_link", issue_codes)
+
+    def test_schema_report_tracks_pending_age_stale_rules_and_info_hints(self) -> None:
+        from kb_service.evidence import EvidenceAnchor, EvidenceReport
+
+        overdue = (date.today() - timedelta(days=30)).isoformat()
+        old = (date.today() - timedelta(days=400)).isoformat()
+        notes = {
+            "Pending.md": f"---\nid: pending\nkind: reference\nstatus: pending\ncaptured: {overdue}\n---\n",
+            "Rule.md": f"---\nid: rule\nkind: rule\nstatus: active\nlast_verified: {old}\n---\n",
+            "Reference.md": f"---\nid: reference\nkind: reference\nstatus: active\nlast_verified: {old}\n---\n",
+        }
+        sections = {
+            "Pending.md": ContextPacketTests.REFERENCE_BODY,
+            "Reference.md": ContextPacketTests.REFERENCE_BODY,
+            "Rule.md": "# Rule\n\n## Use this when\nAlways.\n\n## Rule\nDo it.\n\n## Do\n- It.\n\n"
+            "## Do not\n- Skip it.\n\n## Evidence\n- README.md\n\n## Retrieval hints\n- rule\n",
+        }
+        with TemporaryDirectory() as tmpdir:
+            wiki_root = Path(tmpdir) / "wiki"
+            wiki_root.mkdir()
+            for name, header in notes.items():
+                (wiki_root / name).write_text(header + sections[name], encoding="utf-8")
+            settings = types.SimpleNamespace(
+                wiki_root=wiki_root,
+                kb_root=Path(tmpdir) / "kb",
+                embedding_model="dummy",
+                staleness_days=90,
+            )
+            index = self.indexer_module.KnowledgeIndex(settings)
+            anchor = EvidenceAnchor("README.md", "path", "README.md", "", True, "new", "clean")
+            changed = EvidenceReport(1, (anchor,), changed_targets=("README.md",))
+            def parse_frontmatter(raw: str):
+                _, header, body = raw.split("---\n", 2)
+                metadata = dict(line.split(": ", 1) for line in header.strip().splitlines())
+                return types.SimpleNamespace(content=body, metadata=metadata)
+
+            with (
+                patch.object(self.indexer_module, "EvidenceInspector") as inspector_type,
+                patch.object(self.indexer_module.frontmatter, "loads", side_effect=parse_frontmatter),
+            ):
+                inspector_type.return_value.inspect.return_value = changed
+                report = index.schema_report()
+
+        by_file = {entry["source_file"]: entry for entry in report["files"]}
+        codes = {
+            name: {(issue["severity"], issue["code"]) for issue in entry["issues"]}
+            for name, entry in by_file.items()
+        }
+        self.assertEqual(
+            codes["Pending.md"],
+            {("warning", "pending_overdue"), ("info", "changed_evidence_anchors")},
+        )
+        self.assertEqual(
+            codes["Rule.md"],
+            {("warning", "stale_verification"), ("info", "changed_evidence_anchors")},
+        )
+        self.assertEqual(codes["Reference.md"], {("info", "changed_evidence_anchors")})
+        self.assertEqual(report["summary"]["files_with_issues"], 2)
+        self.assertEqual(report["summary"]["files_with_errors"], 0)
+        self.assertEqual(report["summary"]["by_severity"], {"error": 0, "warning": 2, "info": 3})
 
     def test_schema_report_warns_for_notes_over_line_limit(self) -> None:
         with TemporaryDirectory() as tmpdir:
@@ -1124,6 +1249,21 @@ class WikiPathSafetyTests(unittest.TestCase):
             self.assertEqual((wiki_root / "owner.md").read_bytes(), expected.encode("utf-8"))
             index.edit_doc("owner.md", "new body\r\nextra", "")
             self.assertEqual(index.read_doc("owner.md")["content"], original.replace("old body", ""))
+
+    def test_edit_tolerates_line_ending_differences_and_keeps_note_style(self) -> None:
+        with TemporaryDirectory() as tmpdir:
+            index, wiki_root = self.make_index(Path(tmpdir))
+            index.write_doc("crlf.md", "# Title\r\n\r\nfirst line\r\nsecond line\r\n")
+            result = index.edit_doc("crlf.md", "first line\nsecond line", "one\ntwo")
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual((wiki_root / "crlf.md").read_bytes(), b"# Title\r\n\r\none\r\ntwo\r\n")
+
+            index.write_doc("lf.md", "# Title\n\nfirst line\nsecond line\n")
+            result = index.edit_doc("lf.md", "first line\r\nsecond line", "one\r\ntwo")
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual((wiki_root / "lf.md").read_bytes(), b"# Title\n\none\ntwo\n")
+
+            self.assertEqual(index.edit_doc("lf.md", "one\r\nmissing", "x")["reason"], "text_not_found")
 
     def test_edit_conflicts_and_invalid_arguments_do_not_write(self) -> None:
         with TemporaryDirectory() as tmpdir:

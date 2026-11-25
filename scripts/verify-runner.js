@@ -116,6 +116,7 @@ function assertDockerUnavailableFailsClearly() {
     env: {
       ...TEST_ENV,
       DOCKER_HOST: unavailableDockerHost,
+      KB_LAZY_INIT: "0",
       KB_DOCKER_DAEMON_TIMEOUT_MS: "100",
     },
     input: `${JSON.stringify({
@@ -156,6 +157,7 @@ function assertUnhealthyStartupFailsClearly() {
       KB_CONTAINER_NAME: FAILURE_CONTAINER_NAME,
       KB_VOLUME: FAILURE_KB_VOLUME,
       KB_EMBEDDING_MODEL: "invalid-model-for-wiki-kit-startup-verification",
+      KB_LAZY_INIT: "0",
       KB_HEALTH_TIMEOUT_MS: "1500",
     },
     input: `${JSON.stringify({
@@ -393,11 +395,23 @@ async function main() {
     // Both clients initialize concurrently against a repository with no container.
     const initializationStarted = Date.now();
     await Promise.all([clientA.initialize(), clientB.initialize()]);
-    const coldInitializationSeconds = (Date.now() - initializationStarted) / 1000;
-    if (coldInitializationSeconds >= 150) {
-      fail(
-        `Cold initialization took ${coldInitializationSeconds.toFixed(2)}s, exceeding the generated 150s timeout`
-      );
+    const handshakeSeconds = (Date.now() - initializationStarted) / 1000;
+    // The runner answers initialize from its static manifest, so a cold start
+    // never depends on the host's MCP startup timeout (Claude Code: 30 s).
+    if (handshakeSeconds >= 5) {
+      fail(`Cold handshake took ${handshakeSeconds.toFixed(2)}s; initialize must not wait for the container`);
+    }
+    const earlyTools = await clientA.request(5, "tools/list");
+    if (!earlyTools.result?.tools?.some((tool) => tool.name === "wiki_search")) {
+      fail("Static tools/list did not include wiki_search", JSON.stringify(earlyTools));
+    }
+    // The first tool call is queued until the container is healthy.
+    const warmStarted = Date.now();
+    const firstCall = await clientA.request(2, "tools/call", { name: "wiki_list", arguments: {} });
+    assertToolCallSucceeded(firstCall, "first (queued) wiki_list");
+    const coldInitializationSeconds = (Date.now() - warmStarted) / 1000;
+    if (coldInitializationSeconds >= 100) {
+      fail(`Cold warm-up took ${coldInitializationSeconds.toFixed(2)}s, exceeding the warm-up deadline`);
     }
 
     const binding = inspectBinding();
@@ -492,7 +506,7 @@ async function main() {
     if (remaining.status === 0) fail("wiki-kit stop left the repository container present");
 
     console.log(
-      `verify-runner: ok (${binding.HostIp}:${binding.HostPort}, cold init ${coldInitializationSeconds.toFixed(2)}s, two clients, lifecycle commands)`
+      `verify-runner: ok (${binding.HostIp}:${binding.HostPort}, handshake ${handshakeSeconds.toFixed(2)}s, cold warm-up ${coldInitializationSeconds.toFixed(2)}s, two clients, lifecycle commands)`
     );
   } finally {
     await clientA.close().catch(() => {});

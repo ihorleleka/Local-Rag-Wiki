@@ -10,6 +10,7 @@ const {
   canonicalRepositoryRoot,
   deriveResourceNames,
 } = require("./wiki-manager-contract");
+const manifest = require("./wiki-manager-manifest");
 
 const ROOT = path.resolve(__dirname, "..");
 // Docker image (and tag) that provides the kb-service MCP knowledge service.
@@ -27,6 +28,12 @@ const ALLOW_NETWORK_EXPOSURE = ["1", "true"].includes(
 const KB_WIKI_ROOT = "/workspace/wiki";
 const KB_REPOSITORY_ROOT = "/repository";
 const KB_ROOT = "/workspace/.kb";
+const OPTIONAL_HEALTH_ENV = [
+  "KB_STALENESS_DAYS",
+  "KB_STALENESS_KINDS",
+  "KB_PENDING_MAX_DAYS",
+  "KB_NOTE_MAX_LINES",
+];
 const MODEL_CACHE_ROOT = "/root/.cache/chroma";
 let kbVolume = null;
 let modelCacheVolume = null;
@@ -84,6 +91,22 @@ const DOCKER_DAEMON_TIMEOUT_MS = parseTimeoutMs(
   30000,
   "KB_DOCKER_DAEMON_TIMEOUT_MS"
 );
+// How long a tool call may wait for the background warm-up before it gets a
+// "warming up" error. Keep it below the 120 s tool-call limits the generated
+// Codex and DSH configurations use, so the caller sees our message, not a host timeout.
+const WARMUP_TIMEOUT_MS = parseTimeoutMs(
+  process.env.KB_WARMUP_TIMEOUT_MS,
+  100000,
+  "KB_WARMUP_TIMEOUT_MS"
+);
+// By default the runner answers initialize/tools/list immediately and starts the
+// container in the background. KB_LAZY_INIT=0 restores the blocking startup.
+const LAZY_INIT = !["0", "false", "no", "off"].includes(
+  (process.env.KB_LAZY_INIT || "").trim().toLowerCase()
+);
+// Optional Docker restart policy for a container this runner creates, so it is
+// already warm after a reboot (for example "unless-stopped"). Unset keeps Docker's "no".
+const KB_RESTART_POLICY = (process.env.KB_RESTART_POLICY || "").trim();
 const POLL_INTERVAL_MS = 500;
 
 let shuttingDown = false;
@@ -453,11 +476,17 @@ async function startContainer(port) {
   const rerankerModelPathForContainer = mountReranker
     ? CONTAINER_RERANKER_PATH
     : KB_RERANKER_MODEL_PATH;
+  if (KB_RESTART_POLICY && !/^(no|always|unless-stopped|on-failure(:\d+)?)$/.test(KB_RESTART_POLICY)) {
+    throw new Error(
+      `Invalid KB_RESTART_POLICY "${KB_RESTART_POLICY}". Expected no, always, unless-stopped, or on-failure[:max].`
+    );
+  }
   const dockerArgs = [
     "run",
     "-d",
     "--name",
     containerName,
+    ...(KB_RESTART_POLICY ? ["--restart", KB_RESTART_POLICY] : []),
     // Defense in depth; service-level dumpability protection also covers piped cores.
     "--ulimit",
     "core=0:0",
@@ -503,6 +532,10 @@ async function startContainer(port) {
     `KB_RERANKER_MODEL_PATH=${rerankerModelPathForContainer}`,
     "-e",
     `KB_RERANKER_TOP_N=${KB_RERANKER_TOP_N}`,
+    // Health-signal thresholds keep the service defaults unless the user sets them.
+    ...OPTIONAL_HEALTH_ENV.flatMap((name) =>
+      process.env[name] ? ["-e", `${name}=${process.env[name]}`] : []
+    ),
     "-v",
     `${wikiPath}:${KB_WIKI_ROOT}`,
     "-v",
@@ -787,7 +820,10 @@ function createMcpMessageHandler(mcpUrl, writeJson, options = {}) {
   };
 }
 
-function startHttpBridge(mcpUrl) {
+// Reads newline-delimited or Content-Length framed JSON-RPC from stdin and hands
+// each message to `handle`. With `serialize` (the eager bridge) messages run one
+// at a time; otherwise the handler owns its own ordering.
+function startStdioBridge(createHandler, { serialize = true } = {}) {
   if (bridgeStarted) return;
   bridgeStarted = true;
 
@@ -796,10 +832,26 @@ function startHttpBridge(mcpUrl) {
   let queue = Promise.resolve();
   const decoder = new StringDecoder("utf8");
   let inputMode = null; // "framed" | "ndjson"
-  const handleMessage = createMcpMessageHandler(mcpUrl, (jsonText) => {
+  const handler = createHandler((jsonText) => {
     const writeJson = inputMode === "ndjson" ? writeNdjson : writeFramedJson;
     writeJson(jsonText);
   });
+  const handleMessage = typeof handler === "function" ? handler : handler.handle;
+
+  function dispatch(jsonText) {
+    if (serialize) {
+      queue = queue
+        .then(() => handleMessage(jsonText))
+        .catch((err) => {
+          console.error(err);
+          process.exit(1);
+        });
+    } else {
+      Promise.resolve(handleMessage(jsonText)).catch((err) => {
+        console.error(err?.message || String(err));
+      });
+    }
+  }
 
   process.stdin.on("data", (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
@@ -827,12 +879,7 @@ function startHttpBridge(mcpUrl) {
           try {
             JSON.parse(maybeJson);
             buffer = Buffer.alloc(0);
-            queue = queue
-              .then(() => handleMessage(maybeJson))
-              .catch((err) => {
-                console.error(err);
-                process.exit(1);
-              });
+            dispatch(maybeJson);
             continue;
           } catch {
             break;
@@ -843,12 +890,7 @@ function startHttpBridge(mcpUrl) {
         buffer = buffer.slice(lf + 1);
         if (line.length === 0) continue;
 
-        queue = queue
-          .then(() => handleMessage(line))
-          .catch((err) => {
-            console.error(err);
-            process.exit(1);
-          });
+        dispatch(line);
         continue;
       }
 
@@ -876,20 +918,210 @@ function startHttpBridge(mcpUrl) {
       const payload = buffer.slice(0, pendingLength);
       buffer = buffer.slice(pendingLength);
       pendingLength = null;
-      const jsonText = decoder.write(payload);
-
-      queue = queue
-        .then(() => handleMessage(jsonText))
-        .catch((err) => {
-          console.error(err);
-          process.exit(1);
-        });
+      dispatch(decoder.write(payload));
     }
   });
 
   process.stdin.on("end", () => {
-    queue.finally(() => shutdown().catch(() => process.exit(1)));
+    const drained = typeof handler.idle === "function" ? handler.idle() : queue;
+    Promise.resolve(drained).finally(() => shutdown().catch(() => process.exit(1)));
   });
+}
+
+function startHttpBridge(mcpUrl) {
+  startStdioBridge((writeJson) => createMcpMessageHandler(mcpUrl, writeJson));
+}
+
+function runnerRelativePath() {
+  return path.relative(ROOT, __filename).replace(/\\/g, "/");
+}
+
+function recoveryCommands() {
+  const runner = runnerRelativePath();
+  return (
+    `Recovery: in the repository root run \`KB_LIFECYCLE_COMMAND=start node ${runner}\` ` +
+    "(PowerShell: `$env:KB_LIFECYCLE_COMMAND='start'; node " + runner + "`) or " +
+    "`npx github:ihorleleka/Local-Rag-Wiki start .`, then retry. " +
+    "A client that listed no wiki_* tools needs a new session (or /mcp reconnect) to get them."
+  );
+}
+
+// Answers initialize, ping and tools/list from the static manifest right away,
+// starts the container in the background and holds tool calls until it is ready.
+// A call that is still waiting after `warmupTimeoutMs` gets a "warming up" error
+// instead of a host-level timeout; the next call retries a failed warm-up.
+function createWarmingHandler(warmUp, writeJson, options = {}) {
+  const warmupTimeoutMs = options.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS;
+  const bridgeOptions = options.bridgeOptions || {};
+  let phase = "idle"; // idle | starting | ready | failed
+  let warmPromise = null;
+  let lastError = null;
+  let backend = null; // real handler once the service is attached
+  let suppressBackendOutput = false;
+  let clientInitialize = null;
+  let clientInitialized = false;
+  let backendQueue = Promise.resolve();
+
+  const reply = (id, result) => writeJson(JSON.stringify({ jsonrpc: "2.0", id, result }));
+  const fail = (id, code, message) =>
+    writeJson(JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } }));
+
+  function begin() {
+    if (phase === "starting" || phase === "ready") return warmPromise;
+    phase = "starting";
+    lastError = null;
+    warmPromise = Promise.resolve()
+      .then(warmUp)
+      .then(async (mcpUrl) => {
+        const replayed = [];
+        backend = createMcpMessageHandler(
+          mcpUrl,
+          (text) => { if (suppressBackendOutput) replayed.push(text); else writeJson(text); },
+          bridgeOptions
+        );
+        // The client already completed its handshake with the static manifest;
+        // replay it so the real HTTP session exists, without a second reply.
+        if (clientInitialize) {
+          suppressBackendOutput = true;
+          try {
+            await backend(JSON.stringify(clientInitialize));
+            const failure = replayed.map((text) => JSON.parse(text)).find((message) => message.error);
+            if (failure) throw new Error(`service rejected initialize: ${failure.error.message}`);
+            if (clientInitialized) {
+              await backend(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }));
+            }
+          } finally {
+            suppressBackendOutput = false;
+          }
+        }
+        phase = "ready";
+      })
+      .catch((error) => {
+        phase = "failed";
+        lastError = error;
+        backend = null;
+        console.error(`wiki-manager warm-up failed: ${error?.message || String(error)}`);
+        throw error;
+      });
+    warmPromise.catch(() => {});
+    return warmPromise;
+  }
+
+  function warmingMessage(timedOut) {
+    if (phase === "failed") {
+      return `wiki-manager could not start: ${lastError?.message || "unknown error"}. ${recoveryCommands()}`;
+    }
+    return (
+      "wiki-manager is warming up: the knowledge-service container is still starting " +
+      `(${timedOut ? `waited ${Math.round(warmupTimeoutMs / 1000)}s` : "not ready"}). ` +
+      "Retry this call in 30-60 seconds; do not fall back to local-file mode silently. " +
+      recoveryCommands()
+    );
+  }
+
+  async function waitUntilReady(deadlineAt) {
+    if (phase === "failed") begin(); // retry once per call after a failure
+    const remaining = Math.max(0, deadlineAt - Date.now());
+    let timer;
+    const timeout = new Promise((resolve) => { timer = setTimeout(() => resolve("timeout"), remaining); });
+    try {
+      const outcome = await Promise.race([begin().then(() => "ready", () => "failed"), timeout]);
+      return outcome;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  function negotiate(requested) {
+    return manifest.SUPPORTED_PROTOCOL_VERSIONS.includes(requested)
+      ? requested
+      : manifest.SUPPORTED_PROTOCOL_VERSIONS[0];
+  }
+
+  function forward(request, jsonText) {
+    const arrival = Date.now();
+    const run = async () => {
+      const outcome = backend && phase === "ready"
+        ? "ready"
+        : await waitUntilReady(arrival + warmupTimeoutMs);
+      if (outcome !== "ready") {
+        if (!Object.hasOwn(request, "id")) return;
+        const text = warmingMessage(outcome === "timeout");
+        if (request.method === "tools/call") {
+          reply(request.id, { content: [{ type: "text", text }], isError: true });
+        } else {
+          fail(request.id, -32000, text);
+        }
+        return;
+      }
+      await backend(jsonText);
+    };
+    backendQueue = backendQueue.then(run).catch((error) => {
+      console.error(`wiki-manager: ${error?.message || String(error)}`);
+    });
+    return backendQueue;
+  }
+
+  async function handle(jsonText) {
+    let request;
+    try {
+      request = JSON.parse(jsonText);
+    } catch {
+      return;
+    }
+    if (!request || Array.isArray(request) || typeof request !== "object") return;
+    const hasId = Object.hasOwn(request, "id");
+
+    if (request.method === "initialize") {
+      clientInitialize = request;
+      clientInitialized = false;
+      // A new handshake discards any earlier backend session state.
+      if (backend && phase === "ready") await forward(request, jsonText);
+      else {
+        begin();
+        reply(request.id, {
+          protocolVersion: negotiate(request.params?.protocolVersion),
+          capabilities: { tools: { listChanged: false } },
+          serverInfo: manifest.SERVER_INFO,
+          instructions: manifest.INSTRUCTIONS,
+        });
+      }
+      return;
+    }
+    if (request.method === "notifications/initialized") {
+      clientInitialized = true;
+      if (backend && phase === "ready") await forward(request, jsonText);
+      return;
+    }
+    if (request.method === "ping" && hasId) {
+      reply(request.id, {});
+      return;
+    }
+    if (request.method === "tools/list" && hasId && !(backend && phase === "ready")) {
+      reply(request.id, { tools: manifest.TOOLS });
+      return;
+    }
+    // Notifications and client replies have nothing to go to before the service
+    // is attached; real requests wait for it (bounded by the warm-up deadline).
+    if (!hasId && !(backend && phase === "ready")) return;
+    if (hasId && typeof request.method !== "string" && !(backend && phase === "ready")) return;
+    forward(request, jsonText);
+  }
+
+  return { handle, idle: () => backendQueue, begin, getPhase: () => phase };
+}
+
+async function warmUpService() {
+  const resourceNames = deriveResourceNames(ROOT);
+  kbVolume = resourceNames.kbVolume;
+  modelCacheVolume = resourceNames.hfCacheVolume;
+  containerName = resourceNames.containerName;
+
+  await ensureDockerDaemon();
+  const attachedPort = await attachToRunningContainer(containerName);
+  if (attachedPort !== null) return makeUrls(attachedPort).mcpUrl;
+  const selectedPort = await selectPort();
+  return startOrAttachContainer(selectedPort);
 }
 
 async function main() {
@@ -902,6 +1134,26 @@ async function main() {
 
   validateBindAddress();
 
+  const lifecycleCommand = (process.env.KB_LIFECYCLE_COMMAND || "").trim().toLowerCase();
+  if (lifecycleCommand && !["start", "stop", "restart"].includes(lifecycleCommand)) {
+    throw new Error(`Unknown KB_LIFECYCLE_COMMAND: ${lifecycleCommand}`);
+  }
+
+  // Normal MCP launch: answer the host immediately, warm the container up in
+  // the background. Lifecycle commands and attach-only diagnostics stay blocking
+  // so their exit code reports the outcome.
+  if (!lifecycleCommand && process.env.KB_ATTACH_ONLY !== "1" && LAZY_INIT) {
+    startStdioBridge(
+      (writeJson) => {
+        const handler = createWarmingHandler(warmUpService, writeJson);
+        handler.begin();
+        return handler;
+      },
+      { serialize: false }
+    );
+    return;
+  }
+
   const resourceNames = deriveResourceNames(ROOT);
   kbVolume = resourceNames.kbVolume;
   modelCacheVolume = resourceNames.hfCacheVolume;
@@ -909,13 +1161,9 @@ async function main() {
 
   await ensureDockerDaemon();
 
-  const lifecycleCommand = (process.env.KB_LIFECYCLE_COMMAND || "").trim().toLowerCase();
   if (lifecycleCommand === "stop") {
     await removeContainer();
     return;
-  }
-  if (lifecycleCommand && !["start", "restart"].includes(lifecycleCommand)) {
-    throw new Error(`Unknown KB_LIFECYCLE_COMMAND: ${lifecycleCommand}`);
   }
   if (lifecycleCommand === "restart") {
     await removeContainer();
@@ -953,9 +1201,11 @@ if (require.main === module) {
 }
 
 module.exports = {
+  warmUpService,
   wikiMountMatches,
   canonicalRepositoryRoot,
   deriveResourceNames,
   createMcpMessageHandler,
+  createWarmingHandler,
   postMcpJson,
 };

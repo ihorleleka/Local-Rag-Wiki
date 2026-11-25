@@ -158,7 +158,7 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
     consumerPolicy.includes(`${agentsDir}/skills/wiki/SKILL.md`),
     "AGENTS.md must name the delivered skill for clients without native skill discovery"
   );
-  for (const relativePath of ["SKILL.md", "references/authoring.md", "agents/openai.yaml"]) {
+  for (const relativePath of ["SKILL.md", "references/authoring.md", "references/recovery.md", "agents/openai.yaml"]) {
     const deliveredPath = path.join(path.dirname(wikiSkillPath), relativePath);
     const actual = fs.readFileSync(deliveredPath, "utf8");
     const templatePath = path.join(ROOT, "templates", "root", ".agents", "skills", "wiki", relativePath);
@@ -186,7 +186,7 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
     claudePolicy.indexOf("<!-- END WIKI-KIT MANAGED WIKI POLICY -->")
   ).split(/\r?\n/).slice(1).join("\n").trim();
   assert(managedClaudeBlock === "@AGENTS.md", "managed CLAUDE.md block must contain only the @AGENTS.md import");
-  for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
+  for (const relativePath of ["SKILL.md", "references/authoring.md", "references/recovery.md"]) {
     const canonical = fs.readFileSync(path.join(ROOT, "templates", "root", ".agents", "skills", "wiki", relativePath));
     const native = fs.readFileSync(path.join(targetRoot, ".claude", "skills", "wiki", relativePath));
     assert(native.equals(canonical), `native Claude wiki guidance differs from canonical template: ${relativePath}`);
@@ -194,6 +194,24 @@ function assertDeliveredSurface(targetRoot, agentsDir) {
   const claudeConfig = readJson(path.join(targetRoot, ".mcp.json"));
   assert(claudeConfig.mcpServers?.["wiki-manager"]?.command === "node", "root Claude MCP command is incorrect");
   assert(claudeConfig.mcpServers["wiki-manager"].args?.[0] === `${agentsDir}/run-wiki-manager.mcp.js`, "root Claude MCP runner path is incorrect");
+  // AGENTS.md stays short: it only points at the recovery reference, which owns the steps.
+  for (const expected of ["rather than silently using local files", `${agentsDir}/skills/wiki/references/recovery.md`]) {
+    assert(consumerPolicy.includes(expected), `AGENTS.md recovery pointer is missing: ${expected}`);
+  }
+  const recoveryGuide = fs.readFileSync(path.join(path.dirname(wikiSkillPath), "references", "recovery.md"), "utf8");
+  for (const expected of [
+    "KB_LIFECYCLE_COMMAND=start node .agents/run-wiki-manager.mcp.js",
+    "KB_ATTACH_ONLY=1",
+    "do not switch to local files silently",
+    "new session",
+    "schema-report",
+    "MCP_TIMEOUT=150000",
+  ]) {
+    assert(recoveryGuide.includes(expected), `wiki recovery reference is missing: ${expected}`);
+  }
+  const claudeSettings = readJson(path.join(targetRoot, ".claude", "settings.json"));
+  assert(claudeSettings.env?.MCP_TIMEOUT === "150000", "Claude Code settings must set MCP_TIMEOUT=150000 like Codex and OpenCode");
+  assert(fs.existsSync(path.join(targetRoot, agentsDir, "wiki-manager-manifest.js")), "static MCP manifest was not installed beside the runner");
   assert(fs.existsSync(dshMcpClientPath), "agent-scoped DSH MCP client missing from .dsh");
   assert(!fs.existsSync(path.join(targetRoot, ".dsh-mcp-client.js")), "DSH MCP client leaked into repository root");
   assert(readJson(dshModulePath).type === "module", ".dsh MCP client is not in an ESM package scope");
@@ -500,6 +518,7 @@ function verifyMergedInstall() {
     '[mcp_servers.other-wiki-kit]\ncommand = "node"\nargs = ["other.js"]\n',
     "utf8"
   );
+  fs.writeFileSync(path.join(mergeRoot, ".gitattributes"), "*.png binary\r\n", "utf8");
   const localSettingsPath = path.join(mergeRoot, ".claude", "settings.local.json");
   // Deliberate CRLF, indentation and legacy wiki-manager hooks/configuration: none may be migrated.
   fs.writeFileSync(localSettingsPath, fs.readFileSync(localSettingsPath, "utf8").replace(/\n/g, "\r\n"), "utf8");
@@ -514,11 +533,13 @@ function verifyMergedInstall() {
     ".mcp.json",
     ".claude/skills/wiki/SKILL.md",
     ".claude/skills/wiki/references/authoring.md",
+    ".claude/skills/wiki/references/recovery.md",
     ".vscode/mcp.json",
     ".vscode/settings.json",
     ".claude/settings.local.json",
     "opencode.jsonc",
     ".codex/config.toml",
+    ".gitattributes",
   ];
   const firstMerge = new Map(
     idempotentFiles.map((file) => [file, fs.readFileSync(path.join(mergeRoot, file), "utf8")])
@@ -536,6 +557,10 @@ function verifyMergedInstall() {
     assert(fs.readFileSync(path.join(mergeRoot, file), "utf8") === firstMerge.get(file), `repeated unforced update was not idempotent for ${file}`);
   }
   assertMergedInstall(mergeRoot, ".agents");
+  const gitattributes = fs.readFileSync(path.join(mergeRoot, ".gitattributes"), "utf8");
+  assert(gitattributes.startsWith("*.png binary\r\n"), "user .gitattributes rules or line endings were not preserved");
+  assert(gitattributes.includes("wiki/**/*.md text eol=lf\r\n"), "managed wiki line-ending rule was not merged into .gitattributes");
+  assert(gitattributes.split("# BEGIN WIKI-KIT MANAGED LINE ENDINGS").length === 2, ".gitattributes managed block was duplicated");
   const mergedStatus = run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", mergeRoot]);
   assert(
     mergedStatus.stdout.includes("MCP configs: 5 current, 0 changed, 0 missing, 0 invalid"),
@@ -569,7 +594,7 @@ function verifyMergedInstall() {
 }
 
 function verifyNativeSkillRefresh(targetRoot, agentsDir) {
-  for (const relativePath of ["SKILL.md", "references/authoring.md"]) {
+  for (const relativePath of ["SKILL.md", "references/authoring.md", "references/recovery.md"]) {
     fs.writeFileSync(path.join(targetRoot, ".claude", "skills", "wiki", relativePath), "stale native skill\n", "utf8");
     fs.writeFileSync(path.join(targetRoot, agentsDir, "skills", "wiki", relativePath), "stale canonical copy\n", "utf8");
   }
@@ -761,6 +786,137 @@ function verifyAmbiguousInstall() {
   );
 }
 
+function verifyClaudeSettingsMerge() {
+  const root = path.join(ARTIFACTS_ROOT, "verify-smoke-claude-settings");
+  prepareScratch(root);
+  fs.mkdirSync(path.join(root, ".claude"), { recursive: true });
+  const settingsPath = path.join(root, ".claude", "settings.json");
+  fs.writeFileSync(
+    settingsPath,
+    '{\n  "model": "user-model",\n  "permissions": { "allow": ["Bash(npm test)"] },\n  "env": { "USER_VAR": "1" }\n}\n',
+    "utf8"
+  );
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", root]);
+  const merged = readJson(settingsPath);
+  assert(merged.model === "user-model" && merged.permissions.allow[0] === "Bash(npm test)", "Claude settings merge lost user keys");
+  assert(merged.env.USER_VAR === "1" && merged.env.MCP_TIMEOUT === "150000", "Claude settings merge did not add MCP_TIMEOUT beside user env");
+  const first = fs.readFileSync(settingsPath, "utf8");
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", root, "--force"]);
+  assert(fs.readFileSync(settingsPath, "utf8") === first, "Claude settings merge is not idempotent");
+  assert(
+    run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "status", root]).stdout.includes("0 changed, 0 missing"),
+    "status does not report merged Claude settings as current"
+  );
+
+  // A timeout the user chose deliberately is never overwritten.
+  fs.writeFileSync(settingsPath, '{ "env": { "MCP_TIMEOUT": "240000" } }\n', "utf8");
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", root, "--force"]);
+  assert(readJson(settingsPath).env.MCP_TIMEOUT === "240000", "installer overwrote a user-chosen MCP_TIMEOUT");
+
+  // Malformed user settings must stop the install instead of being replaced.
+  fs.writeFileSync(settingsPath, "{ not json", "utf8");
+  expectFailure(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "update", root], "wiki-kit:");
+  assert(fs.readFileSync(settingsPath, "utf8") === "{ not json", "malformed Claude settings were replaced");
+}
+
+function verifyManifestMatchesService() {
+  const manifest = require(path.join(ROOT, "templates", "root", ".agents", "wiki-manager-manifest.js"));
+  const app = fs.readFileSync(path.join(ROOT, "kb-service", "src", "kb_service", "app.py"), "utf8");
+  const serviceTools = new Map();
+  const pattern = /@mcp\.tool\(\)\s+(?:async\s+)?def (\w+)\(([\s\S]*?)\)(?:\s*->[^:]+)?:\n/g;
+  for (const match of app.matchAll(pattern)) {
+    const params = [];
+    let depth = 0;
+    let current = "";
+    for (const char of match[2]) {
+      if ("[({".includes(char)) depth += 1;
+      if ("])}".includes(char)) depth -= 1;
+      if (char === "," && depth === 0) { params.push(current); current = ""; } else current += char;
+    }
+    params.push(current);
+    const parsed = params.map(text => text.trim()).filter(Boolean).map(text => ({
+      name: text.split(":")[0].trim(),
+      required: !text.includes("="),
+    }));
+    serviceTools.set(match[1], parsed);
+  }
+  assert(serviceTools.size >= 10, "could not read the service tool list from app.py");
+  assert(
+    JSON.stringify([...serviceTools.keys()].sort()) === JSON.stringify(manifest.TOOLS.map(tool => tool.name).sort()),
+    "static manifest tool names differ from kb-service/app.py"
+  );
+  assert(
+    JSON.stringify([...serviceTools.keys()].sort()) === JSON.stringify([...COMPATIBILITY.requiredTools].sort()),
+    "contract requiredTools differ from kb-service/app.py"
+  );
+  for (const tool of manifest.TOOLS) {
+    const expected = serviceTools.get(tool.name);
+    assert(
+      JSON.stringify(Object.keys(tool.inputSchema.properties)) === JSON.stringify(expected.map(param => param.name)),
+      `static manifest parameters differ from the service for ${tool.name}`
+    );
+    assert(
+      JSON.stringify(tool.inputSchema.required) === JSON.stringify(expected.filter(param => param.required).map(param => param.name)),
+      `static manifest required parameters differ from the service for ${tool.name}`
+    );
+  }
+}
+
+// The installed runner must answer a host's handshake even while Docker is
+// unreachable (a cold start), and report the problem on the first tool call.
+function verifyRunnerAnswersWithoutDocker() {
+  const root = path.join(ARTIFACTS_ROOT, "verify-smoke-lazy-runner");
+  prepareScratch(root);
+  run(process.execPath, [path.join(ROOT, "bin", "wiki-kit.js"), "install", root, "--skip-docker"]);
+  const messages = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "lazy-verifier", version: "1" } } },
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    { jsonrpc: "2.0", id: 2, method: "tools/list" },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "wiki_list", arguments: {} } },
+  ];
+  const started = Date.now();
+  const result = spawnSync(process.execPath, [path.join(root, ".agents", "run-wiki-manager.mcp.js")], {
+    cwd: root,
+    env: {
+      ...process.env,
+      DOCKER_HOST: process.platform === "win32" ? "npipe:////./pipe/wiki-kit-docker-unavailable" : "unix:///tmp/wiki-kit-docker-unavailable.sock",
+      KB_DOCKER_DAEMON_TIMEOUT_MS: "100",
+      KB_WARMUP_TIMEOUT_MS: "20000",
+    },
+    input: `${messages.map(message => JSON.stringify(message)).join("\n")}\n`,
+    encoding: "utf8",
+    stdio: "pipe",
+    windowsHide: true,
+    timeout: 60000,
+  });
+  assert(result.status === 0, `lazy runner exited with ${result.status}: ${result.stderr}`);
+  const replies = result.stdout.trim().split("\n").map(line => JSON.parse(line));
+  const byId = new Map(replies.map(reply => [reply.id, reply]));
+  assert(byId.get(1)?.result?.serverInfo, "runner did not answer initialize without Docker");
+  const names = byId.get(2)?.result?.tools?.map(tool => tool.name) || [];
+  for (const required of COMPATIBILITY.requiredTools) assert(names.includes(required), `tools/list without Docker is missing ${required}`);
+  const call = byId.get(3)?.result;
+  assert(call?.isError === true, "tool call without Docker did not return a tool error");
+  const text = call.content?.[0]?.text || "";
+  assert(/could not start/.test(text) && /Docker Desktop's Linux engine is unavailable/.test(text), "tool error did not explain the Docker failure");
+  assert(/KB_LIFECYCLE_COMMAND=start node \.agents\/run-wiki-manager\.mcp\.js/.test(text), "tool error did not give the recovery command");
+  assert(Date.now() - started < 30000, "runner did not answer promptly");
+}
+
+function verifyCliCommands() {
+  const cli = path.join(ROOT, "bin", "wiki-kit.js");
+  expectFailure(process.execPath, [cli, "search", "."], 'search takes a target and a query');
+  expectFailure(process.execPath, [cli, "search", ".", "q", "--top-k", "0"], "--top-k must be a positive integer");
+  expectFailure(process.execPath, [cli, "search", ".", "q", "--depth", "full"], "--depth must be abstract or packet");
+  const missing = path.join(ARTIFACTS_ROOT, "verify-smoke-cli-missing");
+  prepareScratch(missing);
+  expectFailure(process.execPath, [cli, "schema-report", missing], "MCP runner is missing");
+  const help = run(process.execPath, [cli, "--help"]).stdout;
+  for (const expected of ["schema-report", "search [target]", "--keep-warm"]) {
+    assert(help.includes(expected), `usage does not document ${expected}`);
+  }
+}
+
 function verifyPublishedPackage() {
   const inventory = JSON.parse(runNpm(["pack", "--dry-run", "--json"]).stdout);
   // npm versions emit either an array or an object keyed by package name.
@@ -777,8 +933,11 @@ function verifyPublishedPackage() {
     manifest.dsh.bundle.patch,
     "templates/root/CLAUDE.md",
     "templates/root/.mcp.json",
+    "templates/root/.claude/settings.json",
+    "templates/root/.agents/wiki-manager-manifest.js",
     "templates/root/.agents/skills/wiki/SKILL.md",
     "templates/root/.agents/skills/wiki/references/authoring.md",
+    "templates/root/.agents/skills/wiki/references/recovery.md",
     "templates/root/.agents/skills/wiki/agents/openai.yaml",
     "templates/root/.agents/run-wiki-manager.mcp.js",
   ];
@@ -796,6 +955,10 @@ function main() {
     ["user configuration preservation and idempotent updates", verifyMergedInstall],
     ["missing and malformed configuration diagnostics", verifyDiagnostics],
     ["skip-root excludes Claude assets", verifySkipRoot],
+    ["Claude Code startup timeout merges without overwriting user settings", verifyClaudeSettingsMerge],
+    ["static MCP manifest matches the service tools", verifyManifestMatchesService],
+    ["runner answers the host handshake while Docker is unreachable", verifyRunnerAnswersWithoutDocker],
+    ["CLI validation commands", verifyCliCommands],
     ["legacy policy migration", verifyLegacyPolicy],
     ["custom installation and update wrapper", verifyCustomInstall],
     ["docker provisioning is optional and non-fatal", verifyDockerProvisioning],
